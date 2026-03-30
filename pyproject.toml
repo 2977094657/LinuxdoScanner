@@ -1,0 +1,18 @@
+[project]
+name = "linuxdoscanner"
+version = "0.1.0"
+description = "Authenticated Linux.do topic monitor with incremental crawling, SQLite storage, AI triage, and email alerts"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "browser-cookie3>=0.20.1",
+    "httpx>=0.28.1",
+    "playwright>=1.52.0",
+    "openai>=1.109.1",
+]
+
+[project.scripts]
+linuxdoscanner = "linuxdoscanner.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["linuxdoscanner*"]
