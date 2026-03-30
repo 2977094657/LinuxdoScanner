@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <title>LinuxDoScanner Bridge</title>
+    <link rel="stylesheet" href="popup.css">
+  </head>
+  <body>
+    <main class="app">
+      <header class="hero">
+        <div>
+          <p class="eyebrow">Linux.do Monitor</p>
+          <h1>同步状态</h1>
+        </div>
+        <button id="openOptionsButton" class="ghost" type="button">AI 设置</button>
+      </header>
+
+      <section class="status-grid">
+        <article class="status-card">
+          <span class="label">登录状态</span>
+          <strong id="loggedIn">未知</strong>
+        </article>
+        <article class="status-card">
+          <span class="label">最近入库</span>
+          <strong id="lastSyncCount">0</strong>
+        </article>
+        <article class="status-card">
+          <span class="label">最近同步</span>
+          <strong id="lastSyncAt">暂无</strong>
+        </article>
+        <article class="status-card">
+          <span class="label">触发方式</span>
+          <strong id="lastSyncTrigger">暂无</strong>
+        </article>
+      </section>
+
+      <section class="panel">
+        <div class="panel-title">AI 配置摘要</div>
+        <div class="meta-row"><span>提供商</span><strong id="providerType">未配置</strong></div>
+        <div class="meta-row"><span>Base URL</span><strong id="baseUrl">未配置</strong></div>
+        <div class="meta-row"><span>模型</span><strong id="selectedModel">未配置</strong></div>
+        <div class="meta-row"><span>关注点</span><strong id="focusKeywords">未配置</strong></div>
+        <div class="meta-row"><span>模型缓存</span><strong id="modelCount">0</strong></div>
+        <div class="meta-row"><span>最近同步模型</span><strong id="lastModelSyncAt">暂无</strong></div>
+      </section>
+
+      <section class="panel warning">
+        <div class="panel-title">最近错误</div>
+        <p id="lastError">无</p>
+        <p id="lastModelSyncError" class="subtle">模型同步错误：无</p>
+      </section>
+
+      <div class="actions">
+        <button id="syncButton" type="button">立即同步</button>
+        <button id="clearCrawlDataButton" class="danger" type="button">清空抓取库</button>
+      </div>
+    </main>
+
+    <script src="popup.js"></script>
+  </body>
+  </html>

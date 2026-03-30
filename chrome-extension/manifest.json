@@ -1,0 +1,38 @@
+{
+  "manifest_version": 3,
+  "name": "LinuxDoScanner Bridge",
+  "version": "0.1.0",
+  "description": "Use the current logged-in Chrome profile to fetch linux.do topics and send them to the local LinuxDoScanner service.",
+  "minimum_chrome_version": "120",
+  "permissions": [
+    "alarms",
+    "cookies",
+    "storage",
+    "scripting",
+    "tabs"
+  ],
+  "host_permissions": [
+    "https://linux.do/*",
+    "http://127.0.0.1/*",
+    "http://localhost/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "options_page": "options.html",
+  "content_scripts": [
+    {
+      "matches": [
+        "https://linux.do/*"
+      ],
+      "js": [
+        "content.js"
+      ],
+      "run_at": "document_idle"
+    }
+  ],
+  "action": {
+    "default_title": "LinuxDoScanner Bridge",
+    "default_popup": "popup.html"
+  }
+}
