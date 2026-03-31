@@ -3,6 +3,7 @@ const DEFAULT_CONFIG = {
   bridgeToken: "",
   syncEnabled: true,
   intervalMinutes: 5,
+  pageRequestIntervalSeconds: 10,
 };
 
 const DEFAULT_STATUS = {
@@ -12,7 +13,21 @@ const DEFAULT_STATUS = {
   lastError: "",
   loggedIn: false,
   lastServerState: null,
+  syncInProgress: false,
+  syncProgressPercent: 0,
+  syncProgressStage: "",
+  syncProgressLabel: "",
+  syncProgressDetail: "",
+  syncRunId: "",
+  syncProgressUpdatedAt: "",
 };
+
+const PAGE_REQUEST_BURST_COUNT = 10;
+const PAGE_REQUEST_COOLDOWN_SECONDS = 180;
+const SYNC_BADGE_COLOR = "#3367d6";
+
+let activeSyncPromise = null;
+let activeSyncRunId = "";
 
 function storageGet(keys) {
   return chrome.storage.local.get(keys);
@@ -40,6 +55,41 @@ async function saveStatus(patch) {
 async function setBadge(text, color) {
   await chrome.action.setBadgeBackgroundColor({ color });
   await chrome.action.setBadgeText({ text });
+}
+
+function createSyncRunId() {
+  return `sync-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function clampProgressPercent(value) {
+  return Math.max(0, Math.min(100, Math.round(Number(value) || 0)));
+}
+
+function clearSyncProgressPatch(overrides = {}) {
+  return {
+    syncInProgress: false,
+    syncProgressPercent: 0,
+    syncProgressStage: "",
+    syncProgressLabel: "",
+    syncProgressDetail: "",
+    syncRunId: "",
+    syncProgressUpdatedAt: "",
+    ...overrides,
+  };
+}
+
+async function updateSyncProgress(progress) {
+  const syncProgressPercent = clampProgressPercent(progress.percent);
+  await storageSet({
+    syncInProgress: true,
+    syncProgressPercent,
+    syncProgressStage: progress.stage || "",
+    syncProgressLabel: progress.label || "",
+    syncProgressDetail: progress.detail || "",
+    syncRunId: progress.syncRunId || activeSyncRunId,
+    syncProgressUpdatedAt: new Date().toISOString(),
+  });
+  await setBadge(`${syncProgressPercent}%`, progress.color || SYNC_BADGE_COLOR);
 }
 
 async function ensureDefaults() {
@@ -88,6 +138,58 @@ async function bridgeFetch(config, path, options = {}) {
     return null;
   }
   return response.json();
+}
+
+function sleep(ms) {
+  if (ms <= 0) {
+    return Promise.resolve();
+  }
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function bridgePushWithProgress(config, payload, syncRunId) {
+  let polling = true;
+  const pollProgress = (async () => {
+    while (polling) {
+      try {
+        const progress = await bridgeFetch(
+          config,
+          `/api/bridge/progress?sync_run_id=${encodeURIComponent(syncRunId)}`
+        );
+        if (progress?.sync_run_id === syncRunId && (progress.in_progress || Number(progress.percent) > 0)) {
+          await updateSyncProgress({
+            syncRunId,
+            percent: progress.percent,
+            stage: progress.stage,
+            label: progress.label,
+            detail: progress.detail,
+          });
+        }
+      } catch (_error) {
+        // 进度轮询失败时不打断主同步流程。
+      }
+      if (!polling) {
+        break;
+      }
+      await sleep(600);
+    }
+  })();
+
+  try {
+    return await bridgeFetch(config, "/api/bridge/push", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        ...payload,
+        sync_run_id: syncRunId,
+      }),
+    });
+  } finally {
+    polling = false;
+    await pollProgress;
+  }
 }
 
 function maskApiKey(apiKey) {
@@ -192,6 +294,7 @@ async function clearCrawlData() {
     lastSyncCount: 0,
     lastError: "",
     lastServerState: null,
+    ...clearSyncProgressPatch(),
   });
   await setBadge("", "#188038");
   return response;
@@ -363,12 +466,16 @@ async function fetchSiteStateFromTab() {
 }
 
 async function fetchTopicsFromTab(lastSeenTopicId, bootstrapLimit, maxPagesPerRun) {
+  const config = await getConfig();
   return withLinuxDoTab(async (tabId) => {
     const response = await sendMessageToLinuxTab(tabId, {
       type: "fetch-linuxdo-topics",
       lastSeenTopicId,
       bootstrapLimit,
       maxPagesPerRun,
+      pageRequestIntervalSeconds: Number(config.pageRequestIntervalSeconds) || DEFAULT_CONFIG.pageRequestIntervalSeconds,
+      pageRequestBurstCount: PAGE_REQUEST_BURST_COUNT,
+      pageRequestCooldownSeconds: PAGE_REQUEST_COOLDOWN_SECONDS,
     });
     return ensureTopicsResponse(response);
   });
@@ -431,20 +538,36 @@ async function fetchTopicDetails(summaries) {
   return documents;
 }
 
-async function runSync(trigger = "manual") {
+async function executeSync(trigger = "manual") {
   const config = await getConfig();
   if (!config.syncEnabled) {
     await saveStatus({
       lastError: "",
       lastSyncTrigger: trigger,
+      ...clearSyncProgressPatch(),
     });
     await setBadge("OFF", "#777777");
     return { ok: false, reason: "disabled" };
   }
 
-  await setBadge("...", "#3367d6");
+  const syncRunId = createSyncRunId();
+  activeSyncRunId = syncRunId;
+  await updateSyncProgress({
+    syncRunId,
+    percent: 5,
+    stage: "prepare",
+    label: "准备同步",
+    detail: "正在读取本地服务状态",
+  });
   try {
     const serverState = await bridgeFetch(config, "/api/bridge/state");
+    await updateSyncProgress({
+      syncRunId,
+      percent: 12,
+      stage: "site-state",
+      label: "检查登录状态",
+      detail: "正在确认当前浏览器是否已登录 linux.do",
+    });
     const { siteState, topicResponse } = await withLinuxDoTab(async (tabId) => {
       const currentSiteState = await ensureSiteStateResponse(
         await sendMessageToLinuxTab(tabId, { type: "fetch-linuxdo-state" })
@@ -460,9 +583,13 @@ async function runSync(trigger = "manual") {
       const currentTopicResponse = await ensureTopicsResponse(
         await sendMessageToLinuxTab(tabId, {
           type: "fetch-linuxdo-topics",
+          syncRunId,
           lastSeenTopicId: serverState.last_seen_topic_id ?? null,
           bootstrapLimit: Number(serverState.bootstrap_limit) || 30,
           maxPagesPerRun: Number(serverState.max_pages_per_run) || 10,
+          pageRequestIntervalSeconds: Number(config.pageRequestIntervalSeconds) || DEFAULT_CONFIG.pageRequestIntervalSeconds,
+          pageRequestBurstCount: PAGE_REQUEST_BURST_COUNT,
+          pageRequestCooldownSeconds: PAGE_REQUEST_COOLDOWN_SECONDS,
         })
       );
 
@@ -479,17 +606,22 @@ async function runSync(trigger = "manual") {
         lastError: "当前浏览器未登录 linux.do",
         lastSyncTrigger: trigger,
         lastServerState: serverState,
+        ...clearSyncProgressPatch(),
       });
       await setBadge("LOG", "#d93025");
       return { ok: false, reason: "login_required", status };
     }
 
-    const response = await bridgeFetch(config, "/api/bridge/push", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
+    await updateSyncProgress({
+      syncRunId,
+      percent: 88,
+      stage: "push",
+      label: "交给本地服务处理",
+      detail: `已抓取 ${topicResponse.topics?.length || 0} 个主题，正在等待服务端细分进度`,
+    });
+    const response = await bridgePushWithProgress(
+      config,
+      {
         trigger,
         browser: "chrome-extension",
         extensionVersion: chrome.runtime.getManifest().version,
@@ -497,8 +629,9 @@ async function runSync(trigger = "manual") {
         logged_in: Boolean(topicResponse.loggedIn),
         categories: topicResponse.categories || siteState.categories || [],
         topics: topicResponse.topics || [],
-      }),
-    });
+      },
+      syncRunId
+    );
 
     const count = Number(response.stored_count) || 0;
     await saveStatus({
@@ -508,6 +641,7 @@ async function runSync(trigger = "manual") {
       lastError: "",
       loggedIn,
       lastServerState: serverState,
+      ...clearSyncProgressPatch(),
     });
     await setBadge(loggedIn ? (count > 0 ? String(Math.min(count, 99)) : "OK") : "LOG", loggedIn ? "#188038" : "#d93025");
     return { ok: true, storedCount: count };
@@ -516,9 +650,30 @@ async function runSync(trigger = "manual") {
     await saveStatus({
       lastError: message,
       lastSyncTrigger: trigger,
+      ...clearSyncProgressPatch(),
     });
     await setBadge("ERR", "#d93025");
     return { ok: false, error: message };
+  } finally {
+    activeSyncRunId = "";
+  }
+}
+
+async function runSync(trigger = "manual") {
+  if (activeSyncPromise) {
+    return {
+      ok: false,
+      reason: "busy",
+      deferred: trigger === "alarm",
+      status: await getStatus(),
+    };
+  }
+
+  activeSyncPromise = executeSync(trigger);
+  try {
+    return await activeSyncPromise;
+  } finally {
+    activeSyncPromise = null;
   }
 }
 
@@ -542,17 +697,36 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   (async () => {
     if (message?.type === "get-state") {
       const config = await getConfig();
-      const siteState = await fetchSiteStateFromTab().catch(() => ({ loggedIn: false }));
       const status = await getStatus();
-      if (status.loggedIn !== Boolean(siteState.loggedIn)) {
-        await saveStatus({ loggedIn: Boolean(siteState.loggedIn) });
+      let nextStatus = status;
+      if (!status.syncInProgress) {
+        const siteState = await fetchSiteStateFromTab().catch(() => ({ loggedIn: false }));
+        if (status.loggedIn !== Boolean(siteState.loggedIn)) {
+          nextStatus = await saveStatus({ loggedIn: Boolean(siteState.loggedIn) });
+        }
       }
       const aiConfig = await getAiConfig(config).catch(() => null);
       sendResponse({
         config,
-        status: await getStatus(),
+        status: nextStatus,
         aiConfigSummary: buildAiConfigSummary(aiConfig),
       });
+      return;
+    }
+
+    if (message?.type === "sync-progress") {
+      if (!activeSyncRunId || message.syncRunId !== activeSyncRunId) {
+        sendResponse({ ok: false, ignored: true });
+        return;
+      }
+      await updateSyncProgress({
+        syncRunId: message.syncRunId,
+        percent: message.percent,
+        stage: message.stage,
+        label: message.label,
+        detail: message.detail,
+      });
+      sendResponse({ ok: true });
       return;
     }
 
@@ -570,6 +744,10 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
         bridgeToken: message.bridgeToken || "",
         syncEnabled: Boolean(message.syncEnabled),
         intervalMinutes: Math.max(1, Number(message.intervalMinutes) || 5),
+        pageRequestIntervalSeconds: Math.max(
+          1,
+          Number(message.pageRequestIntervalSeconds) || DEFAULT_CONFIG.pageRequestIntervalSeconds
+        ),
       });
       await updateAlarm();
       sendResponse({

@@ -3,14 +3,18 @@
   <head>
     <meta charset="utf-8">
     <title>LinuxDoScanner Bridge</title>
+    <link rel="icon" href="icons/icon32.png">
     <link rel="stylesheet" href="popup.css">
   </head>
   <body>
     <main class="app">
       <header class="hero">
-        <div>
-          <p class="eyebrow">Linux.do Monitor</p>
-          <h1>同步状态</h1>
+        <div class="brand">
+          <img class="brand-logo" src="icons/icon128.png" alt="LinuxdoScanner Logo">
+          <div class="brand-copy">
+            <p class="eyebrow">Linux.do Monitor</p>
+            <h1>同步状态</h1>
+          </div>
         </div>
         <button id="openOptionsButton" class="ghost" type="button">AI 设置</button>
       </header>
@@ -32,6 +36,19 @@
           <span class="label">触发方式</span>
           <strong id="lastSyncTrigger">暂无</strong>
         </article>
+      </section>
+
+      <section id="syncProgressPanel" class="panel progress-panel" hidden>
+        <div class="progress-header">
+          <div>
+            <div id="syncProgressLabel" class="panel-title progress-title">准备同步</div>
+            <p id="syncProgressDetail" class="progress-detail">正在等待后台响应</p>
+          </div>
+          <strong id="syncProgressPercent">0%</strong>
+        </div>
+        <div class="progress-track" aria-hidden="true">
+          <div id="syncProgressFill" class="progress-fill"></div>
+        </div>
       </section>
 
       <section class="panel">

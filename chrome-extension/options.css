@@ -32,6 +32,24 @@ body {
   margin-bottom: 20px;
 }
 
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+
+.brand-copy {
+  min-width: 0;
+}
+
+.brand-logo {
+  width: 72px;
+  height: 72px;
+  border-radius: 18px;
+  flex: 0 0 auto;
+  box-shadow: 0 14px 30px rgba(23, 51, 41, 0.12);
+}
+
 .eyebrow {
   margin: 0 0 6px;
   font-size: 12px;
@@ -88,6 +106,13 @@ h1 {
   display: block;
   margin-bottom: 8px;
   font-size: 13px;
+  color: var(--muted);
+}
+
+.field-note {
+  margin: -4px 0 14px;
+  font-size: 13px;
+  line-height: 1.6;
   color: var(--muted);
 }
 

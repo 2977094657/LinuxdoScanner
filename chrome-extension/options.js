@@ -18,6 +18,7 @@ function fillBridgeConfig(config) {
   document.getElementById("serverUrl").value = config.serverUrl || "";
   document.getElementById("bridgeToken").value = config.bridgeToken || "";
   document.getElementById("intervalMinutes").value = String(config.intervalMinutes || 5);
+  document.getElementById("pageRequestIntervalSeconds").value = String(config.pageRequestIntervalSeconds || 10);
   document.getElementById("syncEnabled").checked = Boolean(config.syncEnabled);
 }
 
@@ -70,6 +71,7 @@ function collectBridgePayload() {
     serverUrl: document.getElementById("serverUrl").value.trim(),
     bridgeToken: document.getElementById("bridgeToken").value.trim(),
     intervalMinutes: Number(document.getElementById("intervalMinutes").value),
+    pageRequestIntervalSeconds: Number(document.getElementById("pageRequestIntervalSeconds").value),
     syncEnabled: document.getElementById("syncEnabled").checked,
   };
 }

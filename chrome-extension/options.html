@@ -3,15 +3,19 @@
   <head>
     <meta charset="utf-8">
     <title>LinuxDoScanner 设置</title>
+    <link rel="icon" href="icons/icon32.png">
     <link rel="stylesheet" href="options.css">
   </head>
   <body>
     <main class="page">
       <header class="page-header">
-        <div>
-          <p class="eyebrow">LinuxDoScanner Bridge</p>
-          <h1>设置中心</h1>
-          <p class="description">配置本地桥接与 AI 模型识别。余额同步本次不启用，仅同步模型列表。</p>
+        <div class="brand">
+          <img class="brand-logo" src="icons/icon128.png" alt="LinuxdoScanner Logo">
+          <div class="brand-copy">
+            <p class="eyebrow">LinuxDoScanner Bridge</p>
+            <h1>设置中心</h1>
+            <p class="description">配置本地桥接与 AI 模型识别。余额同步本次不启用，仅同步模型列表。</p>
+          </div>
         </div>
       </header>
 
@@ -27,8 +31,12 @@
         </label>
         <div class="grid">
           <label class="field">
-            <span>轮询间隔（分钟）</span>
+            <span>自动同步周期（分钟）</span>
             <input id="intervalMinutes" type="number" min="1" step="1">
+          </label>
+          <label class="field">
+            <span>分页抓取间隔（秒）</span>
+            <input id="pageRequestIntervalSeconds" type="number" min="1" step="1">
           </label>
           <div class="field toggle-field">
             <span>自动同步</span>
@@ -38,6 +46,7 @@
             </label>
           </div>
         </div>
+        <p class="field-note">分页默认每 10 秒请求 1 次，连续触发 10 次后自动休息 3 分钟；如果上一次抓取还没结束，会自动顺延到下一个周期。</p>
         <div class="actions compact">
           <button id="saveBridgeButton" type="button">保存桥接设置</button>
         </div>
