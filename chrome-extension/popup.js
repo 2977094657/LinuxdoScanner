@@ -20,7 +20,10 @@ async function sendMessage(message) {
 }
 
 function setText(id, value) {
-  document.getElementById(id).textContent = value;
+  const element = document.getElementById(id);
+  if (element) {
+    element.textContent = value;
+  }
 }
 
 function formatTimestamp(value) {
@@ -33,6 +36,44 @@ function formatTimestamp(value) {
 
 function normalizeProgressPercent(value) {
   return Math.max(0, Math.min(100, Math.round(Number(value) || 0)));
+}
+
+function setSessionStatus(loggedIn) {
+  const pill = document.getElementById("sessionStatePill");
+  if (!pill) {
+    return;
+  }
+  if (loggedIn == null) {
+    pill.dataset.status = "unknown";
+    return;
+  }
+  pill.dataset.status = loggedIn ? "online" : "offline";
+}
+
+function renderKeywordChips(keywords) {
+  const container = document.getElementById("focusKeywords");
+  if (!container) {
+    return;
+  }
+
+  const items = Array.isArray(keywords)
+    ? keywords.map((value) => String(value || "").trim()).filter(Boolean)
+    : [];
+
+  container.innerHTML = "";
+  if (!items.length) {
+    container.classList.add("chip-group-empty");
+    container.textContent = "未配置";
+    return;
+  }
+
+  container.classList.remove("chip-group-empty");
+  for (const item of items) {
+    const chip = document.createElement("span");
+    chip.className = "chip";
+    chip.textContent = item;
+    container.appendChild(chip);
+  }
 }
 
 function fillSyncProgress(status) {
@@ -68,6 +109,13 @@ function fillStatus(statusPatch) {
   setText("lastSyncCount", String(currentStatus.lastSyncCount || 0));
   setText("lastSyncTrigger", currentStatus.lastSyncTrigger || "暂无");
   setText("lastError", currentStatus.lastError || "无");
+  setSessionStatus(currentStatus.loggedIn == null ? null : Boolean(currentStatus.loggedIn));
+
+  const alertCard = document.getElementById("alertCard");
+  if (alertCard) {
+    alertCard.dataset.tone = currentStatus.lastError ? "danger" : "neutral";
+  }
+
   fillSyncProgress(currentStatus);
 }
 
@@ -75,10 +123,15 @@ function fillAiSummary(summary) {
   setText("providerType", summary?.providerType || "未配置");
   setText("baseUrl", summary?.baseUrl || "未配置");
   setText("selectedModel", summary?.selectedModel || "未配置");
-  setText("focusKeywords", (summary?.focusKeywords || []).join(" / ") || "未配置");
   setText("modelCount", String(summary?.availableModelCount || 0));
   setText("lastModelSyncAt", formatTimestamp(summary?.lastModelSyncAt));
-  setText("lastModelSyncError", `模型同步错误：${summary?.lastModelSyncError || "无"}`);
+  setText("lastModelSyncError", summary?.lastModelSyncError || "无");
+  renderKeywordChips(summary?.focusKeywords || []);
+
+  const aiSummaryCard = document.getElementById("aiSummaryCard");
+  if (aiSummaryCard) {
+    aiSummaryCard.dataset.ready = summary?.selectedModel ? "ready" : "draft";
+  }
 }
 
 function handleStorageChanges(changes, areaName) {
@@ -154,4 +207,11 @@ chrome.storage.onChanged.addListener(handleStorageChanges);
 refresh().catch((error) => {
   const message = error instanceof Error ? error.message : String(error);
   setText("lastError", message);
+  setText("lastModelSyncError", message);
+  setSessionStatus(null);
+
+  const alertCard = document.getElementById("alertCard");
+  if (alertCard) {
+    alertCard.dataset.tone = "danger";
+  }
 });

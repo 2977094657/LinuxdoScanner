@@ -8,34 +8,40 @@
   </head>
   <body>
     <main class="app">
-      <header class="hero">
-        <div class="brand">
-          <img class="brand-logo" src="icons/icon128.png" alt="LinuxdoScanner Logo">
-          <div class="brand-copy">
-            <p class="eyebrow">Linux.do Monitor</p>
-            <h1>同步状态</h1>
+      <section class="panel hero-panel">
+        <div class="hero-top">
+          <div class="brand">
+            <img class="brand-logo" src="icons/icon128.png" alt="LinuxdoScanner Logo">
+            <div class="brand-copy">
+              <p class="eyebrow">Linux.do Monitor Console</p>
+              <h1>同步控制台</h1>
+            </div>
           </div>
+          <button id="openOptionsButton" class="ghost quick-action" type="button">AI 设置</button>
         </div>
-        <button id="openOptionsButton" class="ghost" type="button">AI 设置</button>
-      </header>
 
-      <section class="status-grid">
-        <article class="status-card">
-          <span class="label">登录状态</span>
-          <strong id="loggedIn">未知</strong>
-        </article>
-        <article class="status-card">
-          <span class="label">最近入库</span>
-          <strong id="lastSyncCount">0</strong>
-        </article>
-        <article class="status-card">
-          <span class="label">最近同步</span>
-          <strong id="lastSyncAt">暂无</strong>
-        </article>
-        <article class="status-card">
-          <span class="label">触发方式</span>
-          <strong id="lastSyncTrigger">暂无</strong>
-        </article>
+        <div class="hero-pill-row">
+          <article id="sessionStatePill" class="hero-pill" data-status="unknown">
+            <span class="status-dot" aria-hidden="true"></span>
+            <div>
+              <span class="hero-pill-label">浏览器会话</span>
+              <strong id="loggedIn">未知</strong>
+            </div>
+          </article>
+        </div>
+
+        <section class="status-grid" aria-label="同步摘要">
+          <article class="status-card">
+            <span class="label">最近同步</span>
+            <strong id="lastSyncAt">暂无</strong>
+            <p>快速确认本地桥接最近一次完成写入的时间。</p>
+          </article>
+          <article class="status-card">
+            <span class="label">最近入库</span>
+            <strong id="lastSyncCount">0</strong>
+            <p>显示上次同步新增保存到本地服务的主题数量。</p>
+          </article>
+        </section>
       </section>
 
       <section id="syncProgressPanel" class="panel progress-panel" hidden>
@@ -51,20 +57,30 @@
         </div>
       </section>
 
-      <section class="panel">
-        <div class="panel-title">AI 配置摘要</div>
-        <div class="meta-row"><span>提供商</span><strong id="providerType">未配置</strong></div>
-        <div class="meta-row"><span>Base URL</span><strong id="baseUrl">未配置</strong></div>
-        <div class="meta-row"><span>模型</span><strong id="selectedModel">未配置</strong></div>
-        <div class="meta-row"><span>关注点</span><strong id="focusKeywords">未配置</strong></div>
-        <div class="meta-row"><span>模型缓存</span><strong id="modelCount">0</strong></div>
-        <div class="meta-row"><span>最近同步模型</span><strong id="lastModelSyncAt">暂无</strong></div>
+      <section id="aiSummaryCard" class="panel section-card" data-ready="draft">
+        <div class="detail-grid">
+          <article class="detail-card">
+            <span class="detail-label">当前模型</span>
+            <strong id="selectedModel">未配置</strong>
+          </article>
+          <article class="detail-card detail-card-wide">
+            <span class="detail-label">Base URL</span>
+            <strong id="baseUrl">未配置</strong>
+          </article>
+          <article class="detail-card detail-card-wide">
+            <span class="detail-label">关注点</span>
+            <div id="focusKeywords" class="chip-group" aria-live="polite">未配置</div>
+          </article>
+        </div>
       </section>
 
-      <section class="panel warning">
-        <div class="panel-title">最近错误</div>
-        <p id="lastError">无</p>
-        <p id="lastModelSyncError" class="subtle">模型同步错误：无</p>
+      <section id="alertCard" class="panel alert-card" data-tone="neutral">
+        <div class="alert-stack">
+          <article class="alert-box" role="alert" aria-live="assertive">
+            <span class="detail-label">同步错误</span>
+            <p id="lastError">无</p>
+          </article>
+        </div>
       </section>
 
       <div class="actions">
@@ -75,4 +91,4 @@
 
     <script src="popup.js"></script>
   </body>
-  </html>
+</html>
