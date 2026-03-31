@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 import json
 import logging
 import re
@@ -8,11 +9,13 @@ from typing import Any
 import httpx
 
 from .ai_config import AIProviderConfig, normalize_chat_base_url
-from .models import TopicAnalysis, TopicPayload, normalize_topic_tags
+from .models import TopicAnalysis, TopicAnalysisResult, TopicPayload, normalize_topic_tags
 from .settings import Settings
 
 
 LOGGER = logging.getLogger(__name__)
+
+ClassifierProgressCallback = Callable[[dict[str, Any]], None]
 
 LLM_REQUEST_TIMEOUT_SECONDS = 180
 LLM_USER_AGENT = "LinuxdoScanner/1.0"
@@ -118,35 +121,89 @@ class TopicClassifier:
     def analyze(self, payload: TopicPayload) -> TopicAnalysis:
         return self.analyze_many([payload])[0]
 
-    def analyze_many(self, payloads: list[TopicPayload]) -> list[TopicAnalysis]:
+    def analyze_many(
+        self,
+        payloads: list[TopicPayload],
+        progress_callback: ClassifierProgressCallback | None = None,
+    ) -> list[TopicAnalysis]:
+        return [result.analysis for result in self.analyze_many_detailed(payloads, progress_callback=progress_callback)]
+
+    def analyze_many_detailed(
+        self,
+        payloads: list[TopicPayload],
+        progress_callback: ClassifierProgressCallback | None = None,
+    ) -> list[TopicAnalysisResult]:
         if not payloads:
             return []
 
         if self._llm_http is None or not self.model_name or not self._llm_chat_url:
             LOGGER.warning("AI classification unavailable; storing topics without AI labels.")
+            self._emit_progress(
+                progress_callback,
+                event="unavailable",
+                total_topics=len(payloads),
+            )
             return [
-                self._neutral_analysis(
-                    summary="AI 未配置或当前不可用，未执行识别。",
-                    reason="当前仅允许 AI 识别，未使用规则兜底。",
-                    provider="llm_unavailable",
+                TopicAnalysisResult(
+                    analysis=self._neutral_analysis(
+                        summary="AI 未配置或当前不可用，未执行识别。",
+                        reason="当前仅允许 AI 识别，未使用规则兜底。",
+                        provider="llm_unavailable",
+                    )
                 )
                 for _ in payloads
             ]
 
-        results: list[TopicAnalysis] = []
-        for batch in self._batched(payloads, self.settings.llm_batch_size):
+        results: list[TopicAnalysisResult] = []
+        batches = self._batched(payloads, self.settings.llm_batch_size)
+        total_topics = len(payloads)
+        completed_topics = 0
+        for batch_index, batch in enumerate(batches, start=1):
+            self._emit_progress(
+                progress_callback,
+                event="batch_start",
+                batch_index=batch_index,
+                batch_count=len(batches),
+                batch_topic_count=len(batch),
+                completed_topics=completed_topics,
+                total_topics=total_topics,
+            )
             try:
-                results.extend(self._llm_analyze_batch_adaptive(batch))
+                batch_results = self._llm_analyze_batch_adaptive_detailed(
+                    batch,
+                    progress_callback=progress_callback,
+                    completed_topics=completed_topics,
+                    total_topics=total_topics,
+                )
             except Exception as exc:  # pragma: no cover - remote I/O
                 topic_ids = [payload.topic_id for payload in batch]
+                failure_reason = self._summarize_llm_failure(exc)
                 LOGGER.warning("LLM batch enhancement failed for topics %s: %s", topic_ids, exc)
-                LOGGER.warning("LLM batch enhancement exception details: %s", self._serialize_llm_exception(exc))
-                failed = self._neutral_analysis(
-                    summary="AI 识别失败，当前批次未生成标签。",
-                    reason="AI 接口请求失败，未使用规则兜底。",
-                    provider="llm_failed",
-                )
-                results.extend(failed for _ in batch)
+                LOGGER.warning("LLM batch enhancement exception details: %s", failure_reason)
+                batch_results = [
+                    TopicAnalysisResult(
+                        analysis=self._neutral_analysis(
+                            summary="AI 识别失败，当前批次未生成标签。",
+                            reason="AI 接口请求失败，未使用规则兜底。",
+                            provider="llm_failed",
+                        ),
+                        request_succeeded=False,
+                        should_retry=True,
+                        failure_reason=failure_reason,
+                    )
+                    for _ in batch
+                ]
+            results.extend(batch_results)
+            completed_topics += len(batch)
+            self._emit_progress(
+                progress_callback,
+                event="batch_complete",
+                batch_index=batch_index,
+                batch_count=len(batches),
+                batch_topic_count=len(batch),
+                completed_topics=completed_topics,
+                total_topics=total_topics,
+            )
         return results
 
     def _neutral_analysis(
@@ -165,9 +222,29 @@ class TopicClassifier:
             requires_notification=False,
         )
 
-    def _llm_analyze_batch_adaptive(self, payloads: list[TopicPayload]) -> list[TopicAnalysis]:
+    def _llm_analyze_batch_adaptive(
+        self,
+        payloads: list[TopicPayload],
+        progress_callback: ClassifierProgressCallback | None = None,
+    ) -> list[TopicAnalysis]:
+        return [
+            result.analysis
+            for result in self._llm_analyze_batch_adaptive_detailed(
+                payloads,
+                progress_callback=progress_callback,
+            )
+        ]
+
+    def _llm_analyze_batch_adaptive_detailed(
+        self,
+        payloads: list[TopicPayload],
+        progress_callback: ClassifierProgressCallback | None = None,
+        *,
+        completed_topics: int = 0,
+        total_topics: int = 0,
+    ) -> list[TopicAnalysisResult]:
         try:
-            return self._llm_analyze_batch(payloads)
+            return self._llm_analyze_batch_detailed(payloads)
         except Exception as exc:
             if not self._should_retry_with_smaller_batch(exc, payloads):
                 raise
@@ -180,14 +257,38 @@ class TopicClassifier:
                 len(right),
                 [payload.topic_id for payload in payloads],
             )
-            results = self._llm_analyze_batch_adaptive(left)
+            self._emit_progress(
+                progress_callback,
+                event="retry_split",
+                batch_topic_count=len(payloads),
+                left_size=len(left),
+                right_size=len(right),
+                completed_topics=completed_topics,
+                total_topics=total_topics,
+            )
+            results = self._llm_analyze_batch_adaptive_detailed(
+                left,
+                progress_callback=progress_callback,
+                completed_topics=completed_topics,
+                total_topics=total_topics,
+            )
             if right:
-                results.extend(self._llm_analyze_batch_adaptive(right))
+                results.extend(
+                    self._llm_analyze_batch_adaptive_detailed(
+                        right,
+                        progress_callback=progress_callback,
+                        completed_topics=completed_topics,
+                        total_topics=total_topics,
+                    )
+                )
             return results
 
     def _llm_analyze_batch(self, payloads: list[TopicPayload]) -> list[TopicAnalysis]:
+        return [result.analysis for result in self._llm_analyze_batch_detailed(payloads)]
+
+    def _llm_analyze_batch_detailed(self, payloads: list[TopicPayload]) -> list[TopicAnalysisResult]:
         if self._llm_http is None or not self.model_name:  # pragma: no cover - guarded by caller
-            return [self._neutral_analysis() for _ in payloads]
+            return [TopicAnalysisResult(analysis=self._neutral_analysis()) for _ in payloads]
 
         documents = [self._build_prompt_payload(payload) for payload in payloads]
         request_payload = {
@@ -239,19 +340,24 @@ class TopicClassifier:
                 continue
             results_by_topic_id[topic_id] = self._normalize_llm_result(item)
 
-        analyses: list[TopicAnalysis] = []
+        analyses: list[TopicAnalysisResult] = []
         for payload in payloads:
             analysis = results_by_topic_id.get(payload.topic_id)
             if analysis is None:
                 analyses.append(
-                    self._neutral_analysis(
-                        summary="AI 响应缺少该主题结果。",
-                        reason="模型返回的批量结果不完整。",
-                        provider=f"llm_incomplete:{self.model_name}",
+                    TopicAnalysisResult(
+                        analysis=self._neutral_analysis(
+                            summary="AI 响应缺少该主题结果。",
+                            reason="模型返回的批量结果不完整。",
+                            provider=f"llm_incomplete:{self.model_name}",
+                        ),
+                        request_succeeded=False,
+                        should_retry=True,
+                        failure_reason="模型返回的批量结果不完整。",
                     )
                 )
                 continue
-            analyses.append(analysis)
+            analyses.append(TopicAnalysisResult(analysis=analysis, request_succeeded=True))
         return analyses
 
     def _request_llm_content(self, request_payload: dict[str, Any]) -> str:
@@ -440,6 +546,9 @@ class TopicClassifier:
                 pass
         return self._serialize_json(details)
 
+    def _summarize_llm_failure(self, exc: Exception, limit: int = 4000) -> str:
+        return self._truncate_for_log(self._serialize_llm_exception(exc), limit=limit)
+
     def _should_retry_with_smaller_batch(self, exc: Exception, payloads: list[TopicPayload]) -> bool:
         if len(payloads) <= 1:
             return False
@@ -572,3 +681,12 @@ class TopicClassifier:
         if not payloads:
             return []
         return [payloads[index : index + batch_size] for index in range(0, len(payloads), batch_size)]
+
+    def _emit_progress(
+        self,
+        progress_callback: ClassifierProgressCallback | None,
+        **event: Any,
+    ) -> None:
+        if progress_callback is None:
+            return
+        progress_callback(event)

@@ -61,6 +61,7 @@ class Settings:
     browser_fallback_headless: bool
     auth_wait_timeout_seconds: int
     llm_batch_size: int
+    llm_retry_limit: int
     openai_api_key: str | None
     openai_base_url: str | None
     openai_model: str | None
@@ -102,6 +103,7 @@ class Settings:
             browser_fallback_headless=env_bool("LINUXDO_BROWSER_FALLBACK_HEADLESS", True),
             auth_wait_timeout_seconds=int(os.getenv("LINUXDO_AUTH_WAIT_TIMEOUT_SECONDS", "900")),
             llm_batch_size=max(1, int(os.getenv("LINUXDO_LLM_BATCH_SIZE", "10"))),
+            llm_retry_limit=max(0, int(os.getenv("LINUXDO_LLM_RETRY_LIMIT", "3"))),
             openai_api_key=os.getenv("OPENAI_API_KEY"),
             openai_base_url=os.getenv("OPENAI_BASE_URL"),
             openai_model=os.getenv("OPENAI_MODEL", "openai/gpt-oss-120b"),

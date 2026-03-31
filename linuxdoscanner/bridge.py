@@ -5,7 +5,9 @@ import logging
 import threading
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from types import SimpleNamespace
 from typing import Any
+from urllib.parse import parse_qs, urlsplit
 
 from .ai_config import AIConfigManager
 from .notification_config import NotificationConfigManager
@@ -24,6 +26,8 @@ class ExtensionBridgeServer:
         self.ai_config_manager = AIConfigManager(settings, self.monitor.database)
         self.notification_config_manager = NotificationConfigManager(settings, self.monitor.database)
         self._lock = threading.Lock()
+        self._progress_lock = threading.Lock()
+        self._progress_state = self._empty_progress_state()
         self._server = ThreadingHTTPServer(
             (self.settings.bridge_host, self.settings.bridge_port),
             self._build_handler(),
@@ -41,10 +45,11 @@ class ExtensionBridgeServer:
             def do_GET(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API
                 if not bridge._authorize(self):
                     return
-                if self.path == "/api/bridge/health":
+                parsed = bridge._parse_path(self.path)
+                if parsed.path == "/api/bridge/health":
                     bridge._write_json(self, HTTPStatus.OK, {"ok": True, "now": utc_now()})
                     return
-                if self.path == "/api/bridge/state":
+                if parsed.path == "/api/bridge/state":
                     bridge._write_json(
                         self,
                         HTTPStatus.OK,
@@ -58,7 +63,15 @@ class ExtensionBridgeServer:
                         },
                     )
                     return
-                if self.path == "/api/bridge/ai-config":
+                if parsed.path == "/api/bridge/progress":
+                    requested_sync_run_id = parsed.query.get("sync_run_id", [""])[0].strip()
+                    bridge._write_json(
+                        self,
+                        HTTPStatus.OK,
+                        bridge._get_progress_state(sync_run_id=requested_sync_run_id),
+                    )
+                    return
+                if parsed.path == "/api/bridge/ai-config":
                     bridge._write_json(
                         self,
                         HTTPStatus.OK,
@@ -68,7 +81,7 @@ class ExtensionBridgeServer:
                         },
                     )
                     return
-                if self.path == "/api/bridge/notification-config":
+                if parsed.path == "/api/bridge/notification-config":
                     bridge._write_json(
                         self,
                         HTTPStatus.OK,
@@ -83,7 +96,8 @@ class ExtensionBridgeServer:
             def do_PUT(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API
                 if not bridge._authorize(self):
                     return
-                if self.path == "/api/bridge/ai-config":
+                parsed = bridge._parse_path(self.path)
+                if parsed.path == "/api/bridge/ai-config":
                     try:
                         payload = bridge._read_json(self)
                         config = bridge.ai_config_manager.save_config(payload)
@@ -96,7 +110,7 @@ class ExtensionBridgeServer:
                         return
                     bridge._write_json(self, HTTPStatus.OK, {"ok": True, "config": config.to_dict()})
                     return
-                if self.path == "/api/bridge/notification-config":
+                if parsed.path == "/api/bridge/notification-config":
                     try:
                         payload = bridge._read_json(self)
                         config = bridge.notification_config_manager.save_config(payload)
@@ -115,6 +129,7 @@ class ExtensionBridgeServer:
             def do_POST(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API
                 if not bridge._authorize(self):
                     return
+                parsed = bridge._parse_path(self.path)
                 try:
                     payload = bridge._read_json(self)
                 except ValueError as exc:
@@ -125,7 +140,7 @@ class ExtensionBridgeServer:
                     )
                     return
 
-                if self.path == "/api/bridge/ai-config/sync-models":
+                if parsed.path == "/api/bridge/ai-config/sync-models":
                     try:
                         with bridge._lock:
                             config = bridge.ai_config_manager.sync_models(payload if payload else None)
@@ -146,7 +161,7 @@ class ExtensionBridgeServer:
                     bridge._write_json(self, HTTPStatus.OK, {"ok": True, "config": config.to_dict()})
                     return
 
-                if self.path == "/api/bridge/notification-config/test":
+                if parsed.path == "/api/bridge/notification-config/test":
                     try:
                         with bridge._lock:
                             if payload:
@@ -167,7 +182,7 @@ class ExtensionBridgeServer:
                     )
                     return
 
-                if self.path == "/api/bridge/crawl-data/clear":
+                if parsed.path == "/api/bridge/crawl-data/clear":
                     with bridge._lock:
                         cleared = bridge.monitor.database.clear_crawl_data()
                     bridge._write_json(
@@ -181,15 +196,24 @@ class ExtensionBridgeServer:
                     )
                     return
 
-                if self.path != "/api/bridge/push":
+                if parsed.path != "/api/bridge/push":
                     bridge._write_json(self, HTTPStatus.NOT_FOUND, {"ok": False, "error": "not_found"})
                     return
 
                 logged_in = bool(payload.get("logged_in"))
+                sync_run_id = str(payload.get("sync_run_id") or "").strip()
                 bridge.monitor.database.set_state("bridge_last_sync_at", utc_now())
                 bridge.monitor.database.set_state("bridge_logged_in", "1" if logged_in else "0")
 
                 if bridge.settings.require_login and not logged_in:
+                    bridge._set_progress_state(
+                        sync_run_id=sync_run_id,
+                        in_progress=False,
+                        percent=0,
+                        stage="login-required",
+                        label="同步失败",
+                        detail="当前浏览器未登录 linux.do，请先登录后再同步。",
+                    )
                     bridge._write_json(
                         self,
                         HTTPStatus.CONFLICT,
@@ -201,6 +225,14 @@ class ExtensionBridgeServer:
                     )
                     return
 
+                bridge._set_progress_state(
+                    sync_run_id=sync_run_id,
+                    in_progress=True,
+                    percent=89,
+                    stage="bridge-ingest",
+                    label="整理服务端任务",
+                    detail="正在准备入库与 AI 识别流程",
+                )
                 categories = payload.get("categories") or []
                 category_map: dict[int, str] = {}
                 for item in categories:
@@ -222,8 +254,56 @@ class ExtensionBridgeServer:
                     )
                     return
 
-                with bridge._lock:
-                    stored = bridge.monitor.ingest_topic_documents(topic_documents, category_map=category_map)
+                bridge._set_progress_state(
+                    sync_run_id=sync_run_id,
+                    in_progress=True,
+                    percent=89,
+                    stage="bridge-ingest",
+                    label="接收扩展数据",
+                    detail=f"收到 {len(topic_documents)} 个主题，正在交给本地服务处理",
+                )
+
+                def on_monitor_progress(progress: dict[str, Any]) -> None:
+                    bridge._set_progress_state(
+                        sync_run_id=sync_run_id,
+                        in_progress=bool(progress.get("percent", 0) < 100),
+                        percent=int(progress.get("percent") or 0),
+                        stage=str(progress.get("stage") or ""),
+                        label=str(progress.get("label") or ""),
+                        detail=str(progress.get("detail") or ""),
+                    )
+
+                try:
+                    with bridge._lock:
+                        stored = bridge.monitor.ingest_topic_documents(
+                            topic_documents,
+                            category_map=category_map,
+                            progress_callback=on_monitor_progress,
+                        )
+                except Exception as exc:
+                    bridge._set_progress_state(
+                        sync_run_id=sync_run_id,
+                        in_progress=False,
+                        percent=0,
+                        stage="error",
+                        label="同步失败",
+                        detail=str(exc),
+                    )
+                    bridge._write_json(
+                        self,
+                        HTTPStatus.BAD_GATEWAY,
+                        {"ok": False, "error": "ingest_failed", "detail": str(exc)},
+                    )
+                    return
+
+                bridge._set_progress_state(
+                    sync_run_id=sync_run_id,
+                    in_progress=False,
+                    percent=100,
+                    stage="completed",
+                    label="同步完成",
+                    detail=f"本轮新增入库 {len(stored)} 个主题",
+                )
 
                 bridge._write_json(
                     self,
@@ -275,6 +355,52 @@ class ExtensionBridgeServer:
         if not isinstance(data, dict):
             raise ValueError("JSON body 必须是对象。")
         return data
+
+    def _parse_path(self, raw_path: str) -> Any:
+        parsed = urlsplit(raw_path)
+        return SimpleNamespace(path=parsed.path, query=parse_qs(parsed.query))
+
+    def _empty_progress_state(self, *, sync_run_id: str = "") -> dict[str, Any]:
+        return {
+            "ok": True,
+            "in_progress": False,
+            "sync_run_id": sync_run_id,
+            "percent": 0,
+            "stage": "",
+            "label": "",
+            "detail": "",
+            "updated_at": utc_now(),
+        }
+
+    def _set_progress_state(
+        self,
+        *,
+        sync_run_id: str,
+        in_progress: bool,
+        percent: int,
+        stage: str,
+        label: str,
+        detail: str,
+    ) -> None:
+        snapshot = {
+            "ok": True,
+            "in_progress": in_progress,
+            "sync_run_id": sync_run_id,
+            "percent": max(0, min(100, int(percent))),
+            "stage": stage,
+            "label": label,
+            "detail": detail,
+            "updated_at": utc_now(),
+        }
+        with self._progress_lock:
+            self._progress_state = snapshot
+
+    def _get_progress_state(self, *, sync_run_id: str = "") -> dict[str, Any]:
+        with self._progress_lock:
+            snapshot = dict(self._progress_state)
+        if sync_run_id and snapshot.get("sync_run_id") and snapshot["sync_run_id"] != sync_run_id:
+            return self._empty_progress_state(sync_run_id=sync_run_id)
+        return snapshot
 
     def _write_json(
         self,
