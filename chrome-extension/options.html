@@ -26,6 +26,10 @@
           <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>
           <span>桥接设置</span>
         </a></li>
+        <li><a class="nav-item" href="#section-crawl-data" data-section="section-crawl-data">
+          <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 5h18"/><path d="M3 12h18"/><path d="M3 19h18"/><circle cx="7" cy="5" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="17" cy="19" r="1"/></svg>
+          <span>爬取数据</span>
+        </a></li>
         <li><a class="nav-item" href="#section-ai" data-section="section-ai">
           <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg>
           <span>AI 模型</span>
@@ -103,6 +107,74 @@
         </div>
       </section>
 
+      <!-- 爬取数据 -->
+      <section id="section-crawl-data" class="content-section">
+        <div class="section-header">
+          <h1 class="section-heading-text">爬取数据</h1>
+          <p class="section-desc">按关键词、标签、等级、分区、作者和通知状态查看已入库的主题内容。</p>
+        </div>
+
+        <div class="form-card crawl-toolbar-card">
+          <div class="form-card-header">
+            <h2 class="form-card-title">筛选条件</h2>
+            <span id="crawlListStatus" class="form-card-badge crawl-status-badge">准备读取</span>
+          </div>
+
+          <!-- 搜索栏 -->
+          <div class="crawl-search-row">
+            <input id="crawlKeyword" type="text" placeholder="搜索标题、正文、作者、AI 摘要或外链…" class="form-input crawl-search-input">
+            <div class="crawl-search-actions">
+              <button id="applyCrawlFiltersButton" type="button" class="btn btn-primary crawl-search-button">
+                <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
+                搜索
+              </button>
+            </div>
+          </div>
+
+          <!-- 筛选条件行 -->
+          <div class="crawl-filters-row">
+            <select id="crawlTag" class="form-select crawl-filter-select">
+              <option value="">全部标签</option>
+            </select>
+            <select id="crawlAccessLevel" class="form-select crawl-filter-select">
+              <option value="">全部等级</option>
+            </select>
+            <select id="crawlCategory" class="form-select crawl-filter-select">
+              <option value="">全部分区</option>
+            </select>
+            <select id="crawlNotificationStatus" class="form-select crawl-filter-select">
+              <option value="">全部通知</option>
+              <option value="notified">已发送通知</option>
+              <option value="pending">待发送通知</option>
+              <option value="not_required">仅保存，不通知</option>
+            </select>
+            <input id="crawlAuthor" type="text" placeholder="筛选作者" class="form-input crawl-author-input">
+          </div>
+        </div>
+
+        <div id="crawlEmptyState" class="empty-state-card" hidden>
+          <strong id="crawlEmptyTitle" class="empty-state-title">暂无数据</strong>
+          <p id="crawlEmptyHint" class="empty-state-text">当前还没有入库的主题，先执行一次同步再回来查看。</p>
+        </div>
+
+        <div id="crawlDataList" class="crawl-data-list"></div>
+
+        <div class="pagination-bar">
+          <button id="crawlPrevPageButton" type="button" class="btn btn-secondary btn-sm">上一页</button>
+          <div class="pagination-center">
+            <span class="pagination-label">第</span>
+            <input id="crawlPageInput" type="number" min="1" value="1" class="pagination-page-input">
+            <span class="pagination-label">/ <strong id="crawlTotalPages">1</strong> 页</span>
+            <span class="pagination-separator">·</span>
+            <input id="crawlPageSize" type="number" min="1" max="100" value="10" class="pagination-page-input pagination-size-input">
+            <span class="pagination-label">条/页</span>
+          </div>
+          <div class="pagination-right">
+            <button id="crawlNextPageButton" type="button" class="btn btn-secondary btn-sm">下一页</button>
+          </div>
+        </div>
+      </section>
+
       <!-- 桥接设置 -->
       <section id="section-bridge" class="content-section">
         <div class="section-header">
@@ -126,15 +198,87 @@
               <input id="intervalMinutes" type="number" min="1" step="1" class="form-input">
             </label>
             <label class="form-field">
-              <span class="form-label">分页抓取间隔（秒）</span>
-              <input id="pageRequestIntervalSeconds" type="number" min="1" step="1" class="form-input">
+              <span class="form-label">每轮最多页数</span>
+              <input id="maxPagesPerRound" type="number" min="1" step="1" class="form-input">
+            </label>
+            <label class="form-field">
+              <span class="form-label">分页延迟最小值（秒）</span>
+              <input id="pageRequestDelayMinSeconds" type="number" min="0" step="1" class="form-input">
+            </label>
+            <label class="form-field">
+              <span class="form-label">分页延迟最大值（秒）</span>
+              <input id="pageRequestDelayMaxSeconds" type="number" min="0" step="1" class="form-input">
+            </label>
+            <label class="form-field">
+              <span class="form-label">轮次延迟最小值（秒）</span>
+              <input id="roundDelayMinSeconds" type="number" min="0" step="1" class="form-input">
+            </label>
+            <label class="form-field">
+              <span class="form-label">轮次延迟最大值（秒）</span>
+              <input id="roundDelayMaxSeconds" type="number" min="0" step="1" class="form-input">
             </label>
           </div>
+
+          <p class="form-hint">分页会在设定区间内随机等待，单轮扫满“每轮最多页数”后，会按轮次延迟区间随机等待再继续下一轮；如果最大值小于最小值，系统会自动纠正。</p>
 
           <div class="form-actions">
             <button id="saveBridgeButton" type="button" class="btn btn-primary">
               <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></svg>
               保存桥接设置
+            </button>
+          </div>
+        </div>
+
+        <div class="form-card bridge-autostart-card" id="autostartCard" data-state="idle">
+          <div class="form-card-header">
+            <h2 class="form-card-title">Windows 开机启动</h2>
+            <label class="toggle-switch">
+              <input id="autostartEnabled" type="checkbox">
+              <span class="toggle-slider"></span>
+              <span class="toggle-text">启用</span>
+            </label>
+          </div>
+
+          <p class="form-hint">保存后会在当前 Windows 用户的登录自启动目录里写入一个启动脚本。下次登录系统时，它会自动拉起本地 bridge-server；如果你同时启用了“唤醒浏览器”，还会顺带启动 Chrome / Edge，让扩展更快恢复工作。</p>
+
+          <div id="autostartUnsupportedNotice" class="status-inline-note" hidden>当前环境不支持自动写入开机启动。</div>
+
+          <div class="form-grid cols-2">
+            <div class="form-field">
+              <span class="form-label">显示系统托盘</span>
+              <label class="toggle-switch">
+                <input id="autostartUseTray" type="checkbox">
+                <span class="toggle-slider"></span>
+                <span class="toggle-text">默认在后台显示托盘图标</span>
+              </label>
+            </div>
+            <div class="form-field">
+              <span class="form-label">启动时顺带唤醒浏览器</span>
+              <label class="toggle-switch">
+                <input id="autostartLaunchBrowser" type="checkbox">
+                <span class="toggle-slider"></span>
+                <span class="toggle-text">需要时自动拉起 Chrome / Edge</span>
+              </label>
+            </div>
+            <label class="form-field">
+              <span class="form-label">浏览器唤醒地址</span>
+              <input id="autostartBrowserUrl" type="text" placeholder="https://linux.do/latest?order=created" class="form-input">
+            </label>
+            <label class="form-field span-full">
+              <span class="form-label">检测到的浏览器可执行文件</span>
+              <input id="autostartBrowserExecutable" type="text" class="form-input" readonly>
+            </label>
+          </div>
+
+          <div class="status-inline-bar">
+            <span class="status-inline-label">当前状态：</span>
+            <span id="autostartStatusText" class="status-inline-value" aria-live="polite">未启用</span>
+          </div>
+
+          <div class="form-actions">
+            <button id="saveAutostartButton" type="button" class="btn btn-primary">
+              <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></svg>
+              保存开机启动设置
             </button>
           </div>
         </div>
