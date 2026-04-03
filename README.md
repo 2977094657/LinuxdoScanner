@@ -13,25 +13,39 @@
 ## 安装
 
 ```bash
-python -m pip install -e .
+uv sync
 ```
+
+依赖新增和项目维护也建议统一使用 `uv`，例如 `uv add <package>`、`uv sync`、`uv run main.py ...`。
 
 ## 使用方式
 
 本项目现在只保留 Chrome 扩展桥接方案，不再提供调试浏览器、镜像目录或直接抓取的备选路径。
+
+## 配置约定
+
+- 默认启动方式：`uv run main.py`
+- 项目配置：根目录 `config/settings.toml`
+- 日志目录：`output/logs/YYYY/MM/DD/`
+- 普通日志：`DD_info.log`
+- 错误日志：`DD_error.log`
+- SQLite：`output/databases/linuxdo.sqlite3`
+- 评测和其他导出文件：统一放在 `output/`
 
 ### Chrome 扩展桥接当前浏览器
 
 1. 在终端启动本地接收服务：
 
 ```bash
-python main.py bridge-server
+uv run main.py
 ```
+
+如果你更喜欢显式写法，`uv run main.py bridge-server` 也继续可用。
 
 2. 查看扩展目录和本地服务地址：
 
 ```bash
-python main.py bridge-info
+uv run main.py bridge-info
 ```
 
 默认会输出：
@@ -52,7 +66,9 @@ python main.py bridge-info
 - 如果你设置了 `LINUXDO_BRIDGE_TOKEN`，就在扩展里填同一个 token
 - 勾选“启用自动同步”
 - 轮询间隔默认 5 分钟
-- 分页抓取间隔默认 10 秒，连续翻 10 页后会自动休息 3 分钟
+- 每轮默认最多抓 10 页
+- 分页请求会在 `1-10` 秒之间随机等待
+- 每轮结束后会在 `1-180` 秒之间随机等待，再继续下一轮，直到碰到已同步边界
 
 5. 点击扩展里的“立即同步”
 
@@ -73,21 +89,101 @@ set LINUXDO_REQUIRE_LOGIN=1
 
 那么当前浏览器未登录 `linux.do` 时，扩展同步会直接报错，不会只抓公开主题。
 
+### Windows 开机启动
+
+如果你希望电脑登录后自动拉起本地后端，可以在扩展设置页的“桥接设置 -> Windows 开机启动”里直接开启。
+
+- 开启后，会在当前 Windows 用户的 Startup 目录里写入一个启动脚本
+- 下次登录系统时，会自动拉起本地 `bridge-server`
+- 后端启动后会常驻系统托盘，托盘图标使用当前项目 logo，可从托盘菜单直接退出后端
+- 如果同时开启“唤醒浏览器”，脚本还会尝试顺带启动 Chrome / Edge，让扩展也一起恢复工作
+- 如果没有自动检测到浏览器路径，可以在 `config/settings.toml` 的 `[browser].executable` 里手动指定
+
+也可以手动用命令管理：
+
+```bash
+uv run main.py startup-install --launch-browser
+uv run main.py startup-status
+uv run main.py startup-remove
+```
+
+## 构建 Windows EXE
+
+如果你希望把后端单独分发给用户，可以把本地 bridge-server 打成 Windows exe。
+
+先安装构建依赖：
+
+```bash
+uv sync --extra build
+```
+
+然后执行：
+
+```bash
+uv run python scripts/build_windows_exe.py
+```
+
+构建结果会输出到：
+
+- `dist/LinuxDoScannerBackend/LinuxDoScannerBackend.exe`
+
+这是一个 `onedir` 分发目录，旁边会同时带上：
+
+- `config/`
+- `chrome-extension/`
+
+这样 exe 运行时会默认从自身所在目录读取 `config/settings.toml`，开机自启动脚本在打包版下也会直接启动这个 exe，不再依赖 `python main.py`。
+Windows 版本启动后也会显示系统托盘图标，便于用户确认后端存活并主动退出。
+
+## GitHub Actions 自动发布
+
+仓库根目录已经包含发布工作流：
+
+- 文件位置：`.github/workflows/release.yml`
+- 触发方式：只在推送 tag 时触发
+- tag 格式：建议使用 `v1.0.0` 这种语义化版本号
+
+发布时会自动生成两个 Release 产物：
+
+- `LinuxDoScannerBackend-vX.Y.Z-windows-x64.zip`
+- `LinuxDoScannerExtension-vX.Y.Z.zip`
+
+其中扩展包会在打包时自动把 `chrome-extension/manifest.json` 里的 `version` 同步成 tag 对应的版本号，便于用户直接解压后加载。
+
+常用命令：
+
+```bash
+git tag v1.0.0
+git push origin v1.0.0
+```
+
 ## 数据文件
 
-- SQLite: `data/linuxdo.sqlite3`
+- SQLite: `output/databases/linuxdo.sqlite3`
 
 当前主要表：
 
 - `topics`: 主题数据、正文摘要、AI 标注、通知状态
 - `crawler_state`: 增量游标，例如 `last_seen_topic_id`
 
+## 配置文件
+
+默认读取根目录的 `config/settings.toml`，环境变量仍然可以覆盖对应字段。
+
 ## 重要环境变量
 
 - `LINUXDO_BOOTSTRAP_LIMIT`
   默认 `30`
 - `LINUXDO_MAX_PAGES_PER_RUN`
+  默认 `10`，表示每轮最多抓取多少页
+- `LINUXDO_PAGE_REQUEST_DELAY_MIN_SECONDS`
+  默认 `1`
+- `LINUXDO_PAGE_REQUEST_DELAY_MAX_SECONDS`
   默认 `10`
+- `LINUXDO_ROUND_DELAY_MIN_SECONDS`
+  默认 `1`
+- `LINUXDO_ROUND_DELAY_MAX_SECONDS`
+  默认 `180`
 - `LINUXDO_REQUIRE_LOGIN`
   设为 `1` 后，如果当前浏览器未登录 `linux.do`，程序会直接报错，而不是只抓公开主题
 - `LINUXDO_BRIDGE_HOST`

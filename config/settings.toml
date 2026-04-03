@@ -1,0 +1,51 @@
+[paths]
+output_dir = "output"
+state_dir = "output"
+database_dir = "output/databases"
+browser_dir = "output/browser"
+
+[app]
+base_url = "https://linux.do"
+require_login = false
+bridge_host = "127.0.0.1"
+bridge_port = 8765
+bridge_token = ""
+poll_interval_seconds = 300
+bootstrap_limit = 30
+auth_wait_timeout_seconds = 900
+windows_notifications_enabled = true
+
+[crawl]
+max_pages_per_run = 10
+page_request_delay_min_seconds = 1
+page_request_delay_max_seconds = 10
+round_delay_min_seconds = 1
+round_delay_max_seconds = 180
+
+[browser]
+cookie_source = "auto"
+profile_name = ""
+cdp_url = ""
+executable = ""
+fallback_headless = true
+
+[llm]
+api_key = ""
+base_url = ""
+model = "openai/gpt-oss-120b"
+batch_size = 10
+retry_limit = 3
+
+[email]
+host = ""
+port = 465
+username = ""
+password = ""
+sender = ""
+recipient = ""
+use_tls = false
+
+[feishu]
+lark_cli_path = ""
+chat_id = ""
+user_id = ""
