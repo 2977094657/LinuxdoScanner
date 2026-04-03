@@ -41,6 +41,11 @@ uv run main.py
 ```
 
 如果你更喜欢显式写法，`uv run main.py bridge-server` 也继续可用。
+在 Windows 下，默认会显示系统托盘图标；如果你只想以前台方式运行，可以改用：
+
+```bash
+uv run main.py bridge-server --no-tray
+```
 
 2. 查看扩展目录和本地服务地址：
 
@@ -78,6 +83,13 @@ uv run main.py bridge-info
 - 拉取最新主题与详情 JSON
 - 将数据 POST 到本地 `bridge-server`
 - 复用现有 SQLite、AI 标注、邮件通知逻辑
+
+扩展设置页现在已经支持：
+
+- 运行概览与同步进度查看
+- 桥接参数、随机延迟区间和 Windows 开机启动配置
+- 已入库爬取数据的分页查看、筛选与搜索
+- AI 关注点、飞书通知目标与测试消息管理
 
 如果你希望接收即时提醒，可以在扩展设置页里配置 AI 关注点，并按需保存飞书通知目标；邮件通知仍然可以通过环境变量配置。
 
@@ -149,6 +161,11 @@ Windows 版本启动后也会显示系统托盘图标，便于用户确认后端
 - `LinuxDoScannerExtension-vX.Y.Z.zip`
 
 其中扩展包会在打包时自动把 `chrome-extension/manifest.json` 里的 `version` 同步成 tag 对应的版本号，便于用户直接解压后加载。
+
+注意：
+
+- 仅推送分支或普通 commit 不会触发这个发布工作流
+- 只有推送符合 `v*` 规则的 tag，才会开始构建后端压缩包、扩展压缩包并发布 GitHub Release
 
 常用命令：
 
