@@ -17,7 +17,7 @@ def normalize_release_tag(tag_or_version: str) -> tuple[str, str]:
     match = SEMVER_PATTERN.fullmatch(raw_value)
     if not match:
         raise ValueError(
-            "发布版本必须是类似 v1.0.0 或 1.0.0 的格式，且要兼容 Chrome 扩展版本号规则。"
+            "Release version must look like v1.0.0 or 1.0.0 and must satisfy Chrome extension version rules."
         )
     version = match.group("version")
     return f"v{version}", version
@@ -27,11 +27,11 @@ def package_extension(*, project_root: Path, tag_or_version: str, output_dir: Pa
     release_tag, version = normalize_release_tag(tag_or_version)
     source_dir = project_root / "chrome-extension"
     if not source_dir.exists():
-        raise FileNotFoundError(f"未找到扩展目录: {source_dir}")
+        raise FileNotFoundError(f"Extension directory not found: {source_dir}")
 
     manifest_path = source_dir / "manifest.json"
     if not manifest_path.exists():
-        raise FileNotFoundError(f"未找到扩展 manifest: {manifest_path}")
+        raise FileNotFoundError(f"Extension manifest not found: {manifest_path}")
 
     output_dir.mkdir(parents=True, exist_ok=True)
     package_root_name = f"LinuxDoScannerExtension-{release_tag}"
@@ -60,9 +60,9 @@ def package_extension(*, project_root: Path, tag_or_version: str, output_dir: Pa
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="打包 Chrome 扩展并按发布版本更新 manifest 版本号。")
-    parser.add_argument("--tag", required=True, help="Git tag，例如 v1.0.0")
-    parser.add_argument("--output-dir", default="dist", help="输出目录，默认 dist")
+    parser = argparse.ArgumentParser(description="Package the Chrome extension and update manifest version from the release tag.")
+    parser.add_argument("--tag", required=True, help="Git tag, for example v1.0.0")
+    parser.add_argument("--output-dir", default="dist", help="Output directory, default: dist")
     args = parser.parse_args(argv)
 
     project_root = Path(__file__).resolve().parent.parent
@@ -78,7 +78,7 @@ def main(argv: list[str] | None = None) -> int:
         print(str(exc), file=sys.stderr)
         return 1
 
-    print(f"扩展打包完成: {archive_path}")
+    print(f"Extension package complete: {archive_path}")
     return 0
 
 

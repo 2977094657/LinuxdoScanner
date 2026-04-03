@@ -9,7 +9,7 @@ from pathlib import Path
 def normalize_release_tag(tag_or_version: str) -> str:
     raw_value = str(tag_or_version or "").strip()
     if not raw_value:
-        raise ValueError("发布 tag 不能为空。")
+        raise ValueError("Release tag must not be empty.")
     if raw_value.startswith("v"):
         return raw_value
     return f"v{raw_value}"
@@ -19,7 +19,7 @@ def package_backend(*, project_root: Path, tag_or_version: str, output_dir: Path
     release_tag = normalize_release_tag(tag_or_version)
     source_dir = project_root / "dist" / "LinuxDoScannerBackend"
     if not source_dir.exists():
-        raise FileNotFoundError(f"未找到后端构建目录: {source_dir}")
+        raise FileNotFoundError(f"Backend build directory not found: {source_dir}")
 
     output_dir.mkdir(parents=True, exist_ok=True)
     archive_name = f"LinuxDoScannerBackend-{release_tag}-windows-x64.zip"
@@ -35,9 +35,9 @@ def package_backend(*, project_root: Path, tag_or_version: str, output_dir: Path
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="将 Windows 后端构建目录压缩为 Release 产物。")
-    parser.add_argument("--tag", required=True, help="Git tag，例如 v1.0.0")
-    parser.add_argument("--output-dir", default="dist", help="输出目录，默认 dist")
+    parser = argparse.ArgumentParser(description="Package the Windows backend build directory for release.")
+    parser.add_argument("--tag", required=True, help="Git tag, for example v1.0.0")
+    parser.add_argument("--output-dir", default="dist", help="Output directory, default: dist")
     args = parser.parse_args(argv)
 
     project_root = Path(__file__).resolve().parent.parent
@@ -53,7 +53,7 @@ def main(argv: list[str] | None = None) -> int:
         print(str(exc), file=sys.stderr)
         return 1
 
-    print(f"后端打包完成: {archive_path}")
+    print(f"Backend package complete: {archive_path}")
     return 0
 
 

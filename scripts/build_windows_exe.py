@@ -8,7 +8,7 @@ def main() -> int:
     try:
         import PyInstaller.__main__
     except ImportError:
-        print("PyInstaller 未安装。先执行: uv sync --extra build", file=sys.stderr)
+        print("PyInstaller is not installed. Run: uv sync --extra build", file=sys.stderr)
         return 1
 
     project_root = Path(__file__).resolve().parent.parent
@@ -29,7 +29,7 @@ def main() -> int:
     )
 
     exe_path = dist_path / "LinuxDoScannerBackend" / "LinuxDoScannerBackend.exe"
-    print(f"构建完成: {exe_path}")
+    print(f"Build complete: {exe_path}")
     return 0
 
 
