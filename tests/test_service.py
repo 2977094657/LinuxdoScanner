@@ -5,6 +5,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from linuxdoscanner.models import TopicAnalysis, TopicAnalysisResult, TopicPayload
 from linuxdoscanner.service import LinuxDoMonitor
@@ -31,6 +32,41 @@ def build_payload(topic_id: int, *, title: str) -> TopicPayload:
         view_count=3,
         word_count=10,
     )
+
+
+def build_topic_document(topic_id: int, *, title: str) -> dict[str, object]:
+    return {
+        "summary": {
+            "id": topic_id,
+            "slug": f"topic-{topic_id}",
+            "title": title,
+            "category_id": 11,
+            "tags": ["AI相关"],
+            "created_at": "2026-03-30T00:00:00+00:00",
+            "last_posted_at": "2026-03-30T00:05:00+00:00",
+            "reply_count": 1,
+            "like_count": 2,
+            "views": 3,
+            "excerpt": title,
+        },
+        "detail": {
+            "post_stream": {
+                "posts": [
+                    {
+                        "username": "tester",
+                        "name": "Tester",
+                        "avatar_template": "/user_avatar/linux.do/tester/{size}/1_2.png",
+                        "cooked": f"<p>{title}</p>",
+                        "word_count": 10,
+                    }
+                ]
+            },
+            "reply_count": 1,
+            "like_count": 2,
+            "views": 3,
+            "word_count": 10,
+        },
+    }
 
 
 def success_result(label: str) -> TopicAnalysisResult:
@@ -219,6 +255,195 @@ class LinuxDoMonitorAIRetryTests(unittest.TestCase):
             self.assertIn("AI 识别进行中", labels)
             self.assertIn("写入数据库", labels)
             self.assertIn("同步完成", labels)
+
+
+class FakeClient:
+    def __init__(self, pages: dict[int, list[dict[str, object]]]):
+        self.pages = pages
+        self.requested_pages: list[int] = []
+
+    def fetch_latest_page(self, page_number: int) -> dict[str, object]:
+        self.requested_pages.append(page_number)
+        return {
+            "topic_list": {
+                "topics": self.pages.get(page_number, []),
+            }
+        }
+
+
+class LinuxDoMonitorPagingTests(unittest.TestCase):
+    def test_collect_new_topic_summaries_continues_across_multiple_rounds(self) -> None:
+        monitor = object.__new__(LinuxDoMonitor)
+        monitor.settings = SimpleNamespace(
+            max_pages_per_run=2,
+            page_request_delay_min_seconds=0,
+            page_request_delay_max_seconds=0,
+            round_delay_min_seconds=0,
+            round_delay_max_seconds=0,
+        )
+        monitor.client = FakeClient(
+            {
+                0: [{"id": 130}, {"id": 129}],
+                1: [{"id": 128}, {"id": 127}],
+                2: [{"id": 126}, {"id": 125}],
+                3: [{"id": 124}, {"id": 123}],
+            }
+        )
+
+        summaries = monitor._collect_new_topic_summaries(last_seen_topic_id=124, bootstrap_limit=30)
+
+        self.assertEqual([int(item["id"]) for item in summaries], [130, 129, 128, 127, 126, 125])
+        self.assertEqual(monitor.client.requested_pages, [0, 1, 2, 3])
+
+
+class LinuxDoMonitorImportTests(unittest.TestCase):
+    def test_bridge_mode_does_not_import_discourse_client(self) -> None:
+        database_mock = SimpleNamespace(initialize=lambda: None)
+        ai_manager_mock = SimpleNamespace(load_config=lambda: {})
+        notification_manager_mock = SimpleNamespace(load_config=lambda: {})
+
+        with patch("linuxdoscanner.service.Database", return_value=database_mock):
+            with patch("linuxdoscanner.service.AIConfigManager", return_value=ai_manager_mock):
+                with patch("linuxdoscanner.service.NotificationConfigManager", return_value=notification_manager_mock):
+                    with patch("linuxdoscanner.service.TopicClassifier", return_value=SimpleNamespace()):
+                        with patch("linuxdoscanner.service.NotificationDispatcher", return_value=SimpleNamespace()):
+                            with patch("linuxdoscanner.service.importlib.import_module") as import_module_mock:
+                                monitor = LinuxDoMonitor(
+                                    SimpleNamespace(database_path=Path("dummy.sqlite3")),
+                                    enable_client=False,
+                                )
+
+        import_module_mock.assert_not_called()
+        self.assertIsNone(monitor.session_manager)
+        self.assertIsNone(monitor.client)
+
+
+class LinuxDoMonitorStreamingTests(unittest.TestCase):
+    def test_ingest_topic_documents_flushes_ai_requests_by_batch(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            database_path = Path(temp_dir) / "linuxdo.sqlite3"
+            database = Database(database_path)
+            database.initialize()
+
+            documents = [
+                build_topic_document(305, title="topic-305"),
+                build_topic_document(304, title="topic-304"),
+                build_topic_document(303, title="topic-303"),
+                build_topic_document(302, title="topic-302"),
+                build_topic_document(301, title="topic-301"),
+            ]
+
+            monitor = object.__new__(LinuxDoMonitor)
+            monitor.settings = SimpleNamespace(
+                base_url="https://linux.do",
+                llm_retry_limit=3,
+                llm_batch_size=2,
+            )
+            monitor.database = database
+            monitor.classifier = FakeClassifier(
+                [
+                    [success_result("模型更新"), success_result("工具发布")],
+                    [success_result("教程攻略"), success_result("资源分享")],
+                    [success_result("Codex技巧")],
+                ]
+            )
+            monitor.notifier = FakeNotifier()
+            monitor.refresh_classifier = lambda: None
+            monitor.refresh_notifier = lambda: None
+
+            stored = monitor.ingest_topic_documents(
+                documents,
+                category_map={11: "搞七捻三"},
+            )
+
+            self.assertEqual(
+                monitor.classifier.calls,
+                [[305, 304], [303, 302], [301]],
+            )
+            self.assertEqual([payload.topic_id for payload in stored], [305, 304, 303, 302, 301])
+            self.assertEqual(database.get_last_seen_topic_id(), 305)
+
+    def test_ingest_topic_documents_can_skip_last_seen_commit_for_streaming_batches(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            database_path = Path(temp_dir) / "linuxdo.sqlite3"
+            database = Database(database_path)
+            database.initialize()
+
+            documents = [
+                build_topic_document(305, title="topic-305"),
+                build_topic_document(304, title="topic-304"),
+            ]
+
+            monitor = object.__new__(LinuxDoMonitor)
+            monitor.settings = SimpleNamespace(
+                base_url="https://linux.do",
+                llm_retry_limit=3,
+                llm_batch_size=2,
+            )
+            monitor.database = database
+            monitor.classifier = FakeClassifier([[success_result("模型更新"), success_result("工具发布")]])
+            monitor.notifier = FakeNotifier()
+            monitor.refresh_classifier = lambda: None
+            monitor.refresh_notifier = lambda: None
+            progress_events: list[dict[str, object]] = []
+
+            stored = monitor.ingest_topic_documents(
+                documents,
+                category_map={11: "搞七捻三"},
+                progress_callback=progress_events.append,
+                update_last_seen=False,
+                emit_completion_event=False,
+            )
+
+            self.assertEqual([payload.topic_id for payload in stored], [305, 304])
+            self.assertIsNone(database.get_last_seen_topic_id())
+            self.assertNotIn("同步完成", [str(event["label"]) for event in progress_events])
+
+    def test_ingest_topic_documents_updates_last_seen_only_after_all_batches(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            database_path = Path(temp_dir) / "linuxdo.sqlite3"
+            database = Database(database_path)
+            database.initialize()
+
+            documents = [
+                build_topic_document(305, title="topic-305"),
+                build_topic_document(304, title="topic-304"),
+                build_topic_document(303, title="topic-303"),
+            ]
+
+            monitor = object.__new__(LinuxDoMonitor)
+            monitor.settings = SimpleNamespace(
+                base_url="https://linux.do",
+                llm_retry_limit=3,
+                llm_batch_size=2,
+            )
+            monitor.database = database
+            monitor.classifier = FakeClassifier([[success_result("模型更新"), success_result("工具发布")]])
+            monitor.notifier = FakeNotifier()
+            monitor.refresh_classifier = lambda: None
+            monitor.refresh_notifier = lambda: None
+
+            call_count = 0
+
+            def fake_store_payload_batch(payloads, **kwargs):
+                nonlocal call_count
+                call_count += 1
+                if call_count == 1:
+                    return SimpleNamespace(
+                        max_topic_id=max(payload.topic_id for payload in payloads),
+                        saw_successful_ai_request=True,
+                    )
+                raise RuntimeError("boom")
+
+            monitor._store_payload_batch = fake_store_payload_batch
+
+            with self.assertRaisesRegex(RuntimeError, "boom"):
+                monitor.ingest_topic_documents(
+                    documents,
+                    category_map={11: "搞七捻三"},
+                )
+
+            self.assertIsNone(database.get_last_seen_topic_id())
 
 
 if __name__ == "__main__":

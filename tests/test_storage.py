@@ -5,7 +5,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from linuxdoscanner.models import TopicPayload
+from linuxdoscanner.models import TopicAnalysis, TopicPayload
 from linuxdoscanner.storage import Database
 
 
@@ -217,6 +217,135 @@ class DatabaseAIRetryQueueTests(unittest.TestCase):
             self.assertIsNotNone(row)
             self.assertEqual(row[0], "exhausted")
             self.assertEqual(row[1], 3)
+
+
+class DatabaseTopicListTests(unittest.TestCase):
+    def _build_payload(
+        self,
+        topic_id: int,
+        *,
+        title: str,
+        tags: list[str],
+        category_name: str,
+        access_level: str = "public",
+        first_post_html: str | None = None,
+    ) -> TopicPayload:
+        return TopicPayload(
+            topic_id=topic_id,
+            slug=f"topic-{topic_id}",
+            title=title,
+            url=f"https://linux.do/t/topic/{topic_id}",
+            category_id=11,
+            category_name=category_name,
+            tags=tags,
+            created_at=f"2026-03-{topic_id:02d}T00:00:00+00:00",
+            last_posted_at=f"2026-03-{topic_id:02d}T00:05:00+00:00",
+            author_username=f"user-{topic_id}",
+            author_display_name=f"User {topic_id}",
+            author_avatar_url=f"https://cdn.example.com/avatar-{topic_id}.png",
+            first_post_html=first_post_html or f"<p>{title} content</p>",
+            content_text=f"{title} content",
+            external_links=[f"https://example.com/{topic_id}"],
+            reply_count=topic_id,
+            like_count=topic_id + 1,
+            view_count=topic_id + 2,
+            word_count=topic_id + 3,
+            access_level=access_level,
+        )
+
+    def _analysis(self, label: str, *, requires_notification: bool = False) -> TopicAnalysis:
+        return TopicAnalysis(
+            primary_label=label,
+            labels=["AI相关", label],
+            summary=f"{label} summary",
+            reasons=[f"{label} reason"],
+            provider="llm:test-model",
+            requires_notification=requires_notification,
+        )
+
+    def test_list_topics_supports_pagination_filters_and_facets(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            database_path = Path(temp_dir) / "linuxdo.sqlite3"
+            database = Database(database_path)
+            database.initialize()
+
+            payloads = [
+                self._build_payload(
+                    1,
+                    title="Alpha Codex",
+                    tags=["Codex技巧", "AI相关"],
+                    category_name="搞七捻三",
+                    access_level="public",
+                ),
+                self._build_payload(
+                    2,
+                    title="Beta 福利",
+                    tags=["羊毛福利"],
+                    category_name="福利羊毛",
+                    access_level="lv1",
+                    first_post_html="<p>福利路径</p>",
+                ),
+                self._build_payload(
+                    3,
+                    title="Gamma AI",
+                    tags=["AI相关", "实验复现"],
+                    category_name="开发调优",
+                    access_level="lv2",
+                ),
+            ]
+
+            analyses = [
+                self._analysis("Codex技巧", requires_notification=True),
+                self._analysis("羊毛福利"),
+                self._analysis("实验复现", requires_notification=True),
+            ]
+
+            for payload, analysis in zip(payloads, analyses, strict=True):
+                database.upsert_topic(payload, analysis)
+            database.mark_topics_notified([1])
+
+            first_page = database.list_topics(page=1, page_size=2)
+            self.assertEqual(first_page["pagination"]["total"], 3)
+            self.assertEqual(first_page["pagination"]["total_pages"], 2)
+            self.assertEqual(len(first_page["items"]), 2)
+            self.assertEqual([item["topic_id"] for item in first_page["items"]], [3, 2])
+            self.assertEqual(first_page["items"][0]["tags_json"], ["AI相关", "实验复现"])
+            self.assertEqual(first_page["items"][1]["requires_notification"], False)
+
+            keyword_page = database.list_topics(page=1, page_size=10, keyword="福利")
+            self.assertEqual(keyword_page["pagination"]["total"], 1)
+            self.assertEqual(keyword_page["items"][0]["topic_id"], 2)
+
+            tag_page = database.list_topics(page=1, page_size=10, tag="Codex技巧")
+            self.assertEqual([item["topic_id"] for item in tag_page["items"]], [1])
+
+            level_page = database.list_topics(page=1, page_size=10, access_level="lv2")
+            self.assertEqual([item["topic_id"] for item in level_page["items"]], [3])
+
+            category_page = database.list_topics(page=1, page_size=10, category_name="搞七捻三")
+            self.assertEqual([item["topic_id"] for item in category_page["items"]], [1])
+
+            author_page = database.list_topics(page=1, page_size=10, author="User 2")
+            self.assertEqual([item["topic_id"] for item in author_page["items"]], [2])
+
+            pending_notification_page = database.list_topics(page=1, page_size=10, notification_status="pending")
+            self.assertEqual([item["topic_id"] for item in pending_notification_page["items"]], [3])
+
+            notified_page = database.list_topics(page=1, page_size=10, notification_status="notified")
+            self.assertEqual([item["topic_id"] for item in notified_page["items"]], [1])
+
+            muted_page = database.list_topics(page=1, page_size=10, notification_status="not_required")
+            self.assertEqual([item["topic_id"] for item in muted_page["items"]], [2])
+
+            self.assertCountEqual(
+                first_page["filters"]["categories"],
+                ["福利羊毛", "开发调优", "搞七捻三"],
+            )
+            self.assertEqual(first_page["filters"]["access_levels"], ["lv1", "lv2", "public"])
+            self.assertCountEqual(
+                first_page["filters"]["tags"],
+                ["AI相关", "Codex技巧", "实验复现", "羊毛福利"],
+            )
 
 
 if __name__ == "__main__":

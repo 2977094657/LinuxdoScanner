@@ -3,7 +3,12 @@ const DEFAULT_CONFIG = {
   bridgeToken: "",
   syncEnabled: true,
   intervalMinutes: 5,
-  pageRequestIntervalSeconds: 10,
+  maxPagesPerRound: null,
+  pageRequestDelayMinSeconds: null,
+  pageRequestDelayMaxSeconds: null,
+  roundDelayMinSeconds: null,
+  roundDelayMaxSeconds: null,
+  pageRequestIntervalSeconds: null,
 };
 
 const DEFAULT_STATUS = {
@@ -22,8 +27,13 @@ const DEFAULT_STATUS = {
   syncProgressUpdatedAt: "",
 };
 
-const PAGE_REQUEST_BURST_COUNT = 10;
-const PAGE_REQUEST_COOLDOWN_SECONDS = 180;
+const DEFAULT_CRAWL_STRATEGY = {
+  maxPagesPerRound: 10,
+  pageRequestDelayMinSeconds: 1,
+  pageRequestDelayMaxSeconds: 10,
+  roundDelayMinSeconds: 1,
+  roundDelayMaxSeconds: 180,
+};
 const SYNC_BADGE_COLOR = "#3367d6";
 
 let activeSyncPromise = null;
@@ -40,6 +50,64 @@ function storageSet(values) {
 async function getConfig() {
   const stored = await storageGet(DEFAULT_CONFIG);
   return { ...DEFAULT_CONFIG, ...stored };
+}
+
+function toOptionalNonNegativeInteger(value) {
+  if (value === null || value === undefined || value === "") {
+    return null;
+  }
+  const normalized = Number(value);
+  if (!Number.isFinite(normalized)) {
+    return null;
+  }
+  return Math.max(0, Math.round(normalized));
+}
+
+function normalizeDelayRange(minValue, maxValue, fallbackMin, fallbackMax) {
+  let minimum = toOptionalNonNegativeInteger(minValue);
+  let maximum = toOptionalNonNegativeInteger(maxValue);
+  if (minimum == null) {
+    minimum = Math.max(0, Math.round(Number(fallbackMin) || 0));
+  }
+  if (maximum == null) {
+    maximum = Math.max(0, Math.round(Number(fallbackMax) || 0));
+  }
+  if (maximum < minimum) {
+    [minimum, maximum] = [maximum, minimum];
+  }
+  return {
+    minSeconds: minimum,
+    maxSeconds: maximum,
+  };
+}
+
+function resolveCrawlStrategyConfig(config, serverState = null) {
+  const legacyPageDelaySeconds = toOptionalNonNegativeInteger(config.pageRequestIntervalSeconds);
+  const maxPagesPerRound = Math.max(
+    1,
+    toOptionalNonNegativeInteger(config.maxPagesPerRound) ??
+      toOptionalNonNegativeInteger(serverState?.max_pages_per_run) ??
+      DEFAULT_CRAWL_STRATEGY.maxPagesPerRound
+  );
+  const pageDelayRange = normalizeDelayRange(
+    config.pageRequestDelayMinSeconds ?? legacyPageDelaySeconds,
+    config.pageRequestDelayMaxSeconds ?? legacyPageDelaySeconds,
+    serverState?.page_request_delay_min_seconds ?? DEFAULT_CRAWL_STRATEGY.pageRequestDelayMinSeconds,
+    serverState?.page_request_delay_max_seconds ?? DEFAULT_CRAWL_STRATEGY.pageRequestDelayMaxSeconds
+  );
+  const roundDelayRange = normalizeDelayRange(
+    config.roundDelayMinSeconds,
+    config.roundDelayMaxSeconds,
+    serverState?.round_delay_min_seconds ?? DEFAULT_CRAWL_STRATEGY.roundDelayMinSeconds,
+    serverState?.round_delay_max_seconds ?? DEFAULT_CRAWL_STRATEGY.roundDelayMaxSeconds
+  );
+  return {
+    maxPagesPerRound,
+    pageRequestDelayMinSeconds: pageDelayRange.minSeconds,
+    pageRequestDelayMaxSeconds: pageDelayRange.maxSeconds,
+    roundDelayMinSeconds: roundDelayRange.minSeconds,
+    roundDelayMaxSeconds: roundDelayRange.maxSeconds,
+  };
 }
 
 async function getStatus() {
@@ -232,6 +300,12 @@ async function getNotificationConfig(config = null) {
   return response?.config || null;
 }
 
+async function getAutostartConfig(config = null) {
+  const bridgeConfig = config || await getConfig();
+  const response = await bridgeFetch(bridgeConfig, "/api/bridge/autostart");
+  return response?.status || null;
+}
+
 async function saveAiConfig(payload) {
   const config = await getConfig();
   const response = await bridgeFetch(config, "/api/bridge/ai-config", {
@@ -279,6 +353,23 @@ async function testNotificationConfig(payload) {
   });
 }
 
+async function saveAutostartConfig(payload) {
+  const config = await getConfig();
+  const response = await bridgeFetch(config, "/api/bridge/autostart", {
+    method: "PUT",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      enabled: Boolean(payload.enabled),
+      use_tray: Boolean(payload.useTray),
+      launch_browser: Boolean(payload.launchBrowser),
+      browser_url: payload.browserUrl || "",
+    }),
+  });
+  return response?.status || null;
+}
+
 async function clearCrawlData() {
   const config = await getConfig();
   const response = await bridgeFetch(config, "/api/bridge/crawl-data/clear", {
@@ -298,6 +389,32 @@ async function clearCrawlData() {
   });
   await setBadge("", "#188038");
   return response;
+}
+
+async function getCrawlData(params = {}) {
+  const config = await getConfig();
+  const search = new URLSearchParams();
+  const page = Math.max(1, Number(params.page) || 1);
+  const pageSize = Math.max(1, Number(params.pageSize) || 10);
+  search.set("page", String(page));
+  search.set("page_size", String(pageSize));
+
+  const optionalParams = {
+    keyword: params.keyword,
+    tag: params.tag,
+    access_level: params.accessLevel,
+    category_name: params.categoryName,
+    author: params.author,
+    notification_status: params.notificationStatus,
+  };
+  for (const [key, value] of Object.entries(optionalParams)) {
+    const normalized = String(value || "").trim();
+    if (normalized) {
+      search.set(key, normalized);
+    }
+  }
+
+  return bridgeFetch(config, `/api/bridge/crawl-data?${search.toString()}`);
 }
 
 async function linuxFetchJson(path) {
@@ -465,79 +582,6 @@ async function fetchSiteStateFromTab() {
   }, { allowActiveReuse: true });
 }
 
-async function fetchTopicsFromTab(lastSeenTopicId, bootstrapLimit, maxPagesPerRun) {
-  const config = await getConfig();
-  return withLinuxDoTab(async (tabId) => {
-    const response = await sendMessageToLinuxTab(tabId, {
-      type: "fetch-linuxdo-topics",
-      lastSeenTopicId,
-      bootstrapLimit,
-      maxPagesPerRun,
-      pageRequestIntervalSeconds: Number(config.pageRequestIntervalSeconds) || DEFAULT_CONFIG.pageRequestIntervalSeconds,
-      pageRequestBurstCount: PAGE_REQUEST_BURST_COUNT,
-      pageRequestCooldownSeconds: PAGE_REQUEST_COOLDOWN_SECONDS,
-    });
-    return ensureTopicsResponse(response);
-  });
-}
-
-async function collectTopicDocuments(lastSeenTopicId, bootstrapLimit, maxPagesPerRun) {
-  const selected = [];
-  const seen = new Set();
-
-  for (let page = 0; page < maxPagesPerRun; page += 1) {
-    const suffix = page === 0 ? "/latest.json?order=created" : `/latest.json?order=created&page=${page}`;
-    const data = await linuxFetchJson(suffix);
-    const topics = (((data || {}).topic_list || {}).topics) || [];
-    if (!topics.length) {
-      break;
-    }
-
-    for (const topic of topics) {
-      const topicId = Number(topic.id);
-      if (!topicId || seen.has(topicId)) {
-        continue;
-      }
-      seen.add(topicId);
-
-      if (lastSeenTopicId == null) {
-        selected.push(topic);
-        if (selected.length >= bootstrapLimit) {
-          return fetchTopicDetails(selected);
-        }
-        continue;
-      }
-
-      if (topicId <= lastSeenTopicId) {
-        return fetchTopicDetails(selected);
-      }
-
-      selected.push(topic);
-    }
-  }
-
-  return fetchTopicDetails(selected);
-}
-
-async function fetchTopicDetails(summaries) {
-  const documents = [];
-  for (const summary of summaries) {
-    let detail = null;
-    let detailError = "";
-    try {
-      detail = await linuxFetchJson(`/t/${encodeURIComponent(summary.slug)}/${summary.id}.json`);
-    } catch (error) {
-      detailError = error instanceof Error ? error.message : String(error);
-    }
-    documents.push({
-      summary,
-      detail,
-      detail_error: detailError,
-    });
-  }
-  return documents;
-}
-
 async function executeSync(trigger = "manual") {
   const config = await getConfig();
   if (!config.syncEnabled) {
@@ -561,6 +605,7 @@ async function executeSync(trigger = "manual") {
   });
   try {
     const serverState = await bridgeFetch(config, "/api/bridge/state");
+    const effectiveCrawlStrategy = resolveCrawlStrategyConfig(config, serverState);
     await updateSyncProgress({
       syncRunId,
       percent: 12,
@@ -568,7 +613,7 @@ async function executeSync(trigger = "manual") {
       label: "检查登录状态",
       detail: "正在确认当前浏览器是否已登录 linux.do",
     });
-    const { siteState, topicResponse } = await withLinuxDoTab(async (tabId) => {
+    const { siteState, syncResponse } = await withLinuxDoTab(async (tabId) => {
       const currentSiteState = await ensureSiteStateResponse(
         await sendMessageToLinuxTab(tabId, { type: "fetch-linuxdo-state" })
       );
@@ -576,26 +621,30 @@ async function executeSync(trigger = "manual") {
       if (serverState.require_login && !currentSiteState.loggedIn) {
         return {
           siteState: currentSiteState,
-          topicResponse: null,
+          syncResponse: null,
         };
       }
 
-      const currentTopicResponse = await ensureTopicsResponse(
+      const currentSyncResponse = await ensureTopicsResponse(
         await sendMessageToLinuxTab(tabId, {
           type: "fetch-linuxdo-topics",
           syncRunId,
+          loggedIn: Boolean(currentSiteState.loggedIn),
+          categories: currentSiteState.categories || [],
           lastSeenTopicId: serverState.last_seen_topic_id ?? null,
           bootstrapLimit: Number(serverState.bootstrap_limit) || 30,
-          maxPagesPerRun: Number(serverState.max_pages_per_run) || 10,
-          pageRequestIntervalSeconds: Number(config.pageRequestIntervalSeconds) || DEFAULT_CONFIG.pageRequestIntervalSeconds,
-          pageRequestBurstCount: PAGE_REQUEST_BURST_COUNT,
-          pageRequestCooldownSeconds: PAGE_REQUEST_COOLDOWN_SECONDS,
+          maxPagesPerRun: effectiveCrawlStrategy.maxPagesPerRound,
+          pushBatchSize: Math.max(1, Number(serverState.llm_batch_size) || 1),
+          pageRequestDelayMinSeconds: effectiveCrawlStrategy.pageRequestDelayMinSeconds,
+          pageRequestDelayMaxSeconds: effectiveCrawlStrategy.pageRequestDelayMaxSeconds,
+          roundDelayMinSeconds: effectiveCrawlStrategy.roundDelayMinSeconds,
+          roundDelayMaxSeconds: effectiveCrawlStrategy.roundDelayMaxSeconds,
         })
       );
 
       return {
         siteState: currentSiteState,
-        topicResponse: currentTopicResponse,
+        syncResponse: currentSyncResponse,
       };
     });
     const loggedIn = siteState.loggedIn;
@@ -612,28 +661,7 @@ async function executeSync(trigger = "manual") {
       return { ok: false, reason: "login_required", status };
     }
 
-    await updateSyncProgress({
-      syncRunId,
-      percent: 88,
-      stage: "push",
-      label: "交给本地服务处理",
-      detail: `已抓取 ${topicResponse.topics?.length || 0} 个主题，正在等待服务端细分进度`,
-    });
-    const response = await bridgePushWithProgress(
-      config,
-      {
-        trigger,
-        browser: "chrome-extension",
-        extensionVersion: chrome.runtime.getManifest().version,
-        fetchedAt: new Date().toISOString(),
-        logged_in: Boolean(topicResponse.loggedIn),
-        categories: topicResponse.categories || siteState.categories || [],
-        topics: topicResponse.topics || [],
-      },
-      syncRunId
-    );
-
-    const count = Number(response.stored_count) || 0;
+    const count = Number(syncResponse?.storedCount) || 0;
     await saveStatus({
       lastSyncAt: new Date().toISOString(),
       lastSyncTrigger: trigger,
@@ -698,6 +726,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     if (message?.type === "get-state") {
       const config = await getConfig();
       const status = await getStatus();
+      const serverState = await bridgeFetch(config, "/api/bridge/state").catch(() => null);
       let nextStatus = status;
       if (!status.syncInProgress) {
         const siteState = await fetchSiteStateFromTab().catch(() => ({ loggedIn: false }));
@@ -710,6 +739,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
         config,
         status: nextStatus,
         aiConfigSummary: buildAiConfigSummary(aiConfig),
+        serverState,
       });
       return;
     }
@@ -730,6 +760,38 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       return;
     }
 
+    if (message?.type === "bridge-push-topic-batch") {
+      if (!activeSyncRunId || message.syncRunId !== activeSyncRunId) {
+        sendResponse({ ok: false, error: "sync_run_mismatch" });
+        return;
+      }
+
+      const config = await getConfig();
+      const response = await bridgePushWithProgress(
+        config,
+        {
+          trigger: message.trigger || "manual",
+          browser: "chrome-extension",
+          extensionVersion: chrome.runtime.getManifest().version,
+          fetchedAt: new Date().toISOString(),
+          logged_in: Boolean(message.loggedIn),
+          categories: Array.isArray(message.categories) ? message.categories : [],
+          topics: Array.isArray(message.topics) ? message.topics : [],
+          streaming: true,
+          final_batch: Boolean(message.finalBatch),
+          batch_index: Math.max(1, Number(message.batchIndex) || 1),
+        },
+        message.syncRunId
+      );
+      sendResponse({
+        ok: true,
+        storedCount: Number(response?.stored_count) || 0,
+        storedCountTotal: Number(response?.stored_count_total) || 0,
+        lastSeenTopicId: response?.last_seen_topic_id ?? null,
+      });
+      return;
+    }
+
     if (message?.type === "get-extension-config") {
       sendResponse({
         ok: true,
@@ -744,10 +806,12 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
         bridgeToken: message.bridgeToken || "",
         syncEnabled: Boolean(message.syncEnabled),
         intervalMinutes: Math.max(1, Number(message.intervalMinutes) || 5),
-        pageRequestIntervalSeconds: Math.max(
-          1,
-          Number(message.pageRequestIntervalSeconds) || DEFAULT_CONFIG.pageRequestIntervalSeconds
-        ),
+        maxPagesPerRound: Math.max(1, Number(message.maxPagesPerRound) || DEFAULT_CRAWL_STRATEGY.maxPagesPerRound),
+        pageRequestDelayMinSeconds: Math.max(0, Number(message.pageRequestDelayMinSeconds) || 0),
+        pageRequestDelayMaxSeconds: Math.max(0, Number(message.pageRequestDelayMaxSeconds) || 0),
+        roundDelayMinSeconds: Math.max(0, Number(message.roundDelayMinSeconds) || 0),
+        roundDelayMaxSeconds: Math.max(0, Number(message.roundDelayMaxSeconds) || 0),
+        pageRequestIntervalSeconds: null,
       });
       await updateAlarm();
       sendResponse({
@@ -769,6 +833,14 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       sendResponse({
         ok: true,
         config: await getNotificationConfig(),
+      });
+      return;
+    }
+
+    if (message?.type === "get-autostart-config") {
+      sendResponse({
+        ok: true,
+        status: await getAutostartConfig(),
       });
       return;
     }
@@ -830,6 +902,18 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       return;
     }
 
+    if (message?.type === "save-autostart-config") {
+      sendResponse({
+        ok: true,
+        status: await saveAutostartConfig({
+          enabled: Boolean(message.enabled),
+          launchBrowser: Boolean(message.launchBrowser),
+          browserUrl: message.browserUrl,
+        }),
+      });
+      return;
+    }
+
     if (message?.type === "sync-now") {
       sendResponse(await runSync("manual"));
       return;
@@ -837,6 +921,23 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 
     if (message?.type === "clear-crawl-data") {
       sendResponse(await clearCrawlData());
+      return;
+    }
+
+    if (message?.type === "get-crawl-data") {
+      sendResponse({
+        ok: true,
+        ...(await getCrawlData({
+          page: message.page,
+          pageSize: message.pageSize,
+          keyword: message.keyword,
+          tag: message.tag,
+          accessLevel: message.accessLevel,
+          categoryName: message.categoryName,
+          author: message.author,
+          notificationStatus: message.notificationStatus,
+        })),
+      });
       return;
     }
 

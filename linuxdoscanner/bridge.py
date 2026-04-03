@@ -14,6 +14,7 @@ from .notification_config import NotificationConfigManager
 from .service import LinuxDoMonitor
 from .settings import Settings
 from .storage import utc_now
+from .windows_startup import WindowsStartupManager
 
 
 LOGGER = logging.getLogger(__name__)
@@ -26,8 +27,11 @@ class ExtensionBridgeServer:
         self.ai_config_manager = AIConfigManager(settings, self.monitor.database)
         self.notification_config_manager = NotificationConfigManager(settings, self.monitor.database)
         self._lock = threading.Lock()
+        self._close_lock = threading.Lock()
+        self._closed = False
         self._progress_lock = threading.Lock()
         self._progress_state = self._empty_progress_state()
+        self._stream_sessions: dict[str, dict[str, int]] = {}
         self._server = ThreadingHTTPServer(
             (self.settings.bridge_host, self.settings.bridge_port),
             self._build_handler(),
@@ -58,6 +62,11 @@ class ExtensionBridgeServer:
                             "base_url": bridge.settings.base_url,
                             "bootstrap_limit": bridge.settings.bootstrap_limit,
                             "max_pages_per_run": bridge.settings.max_pages_per_run,
+                            "llm_batch_size": bridge.settings.llm_batch_size,
+                            "page_request_delay_min_seconds": bridge.settings.page_request_delay_min_seconds,
+                            "page_request_delay_max_seconds": bridge.settings.page_request_delay_max_seconds,
+                            "round_delay_min_seconds": bridge.settings.round_delay_min_seconds,
+                            "round_delay_max_seconds": bridge.settings.round_delay_max_seconds,
                             "last_seen_topic_id": bridge.monitor.database.get_last_seen_topic_id(),
                             "require_login": bridge.settings.require_login,
                         },
@@ -88,6 +97,43 @@ class ExtensionBridgeServer:
                         {
                             "ok": True,
                             "config": bridge.notification_config_manager.load_config().to_dict(),
+                        },
+                    )
+                    return
+                if parsed.path == "/api/bridge/autostart":
+                    bridge._write_json(
+                        self,
+                        HTTPStatus.OK,
+                        {
+                            "ok": True,
+                            "status": WindowsStartupManager(bridge.settings).status().to_dict(),
+                        },
+                    )
+                    return
+                if parsed.path == "/api/bridge/crawl-data":
+                    page = bridge._read_int_query_param(parsed.query, "page", default=1, minimum=1)
+                    page_size = bridge._read_int_query_param(parsed.query, "page_size", default=10, minimum=1, maximum=100)
+                    keyword = parsed.query.get("keyword", [""])[0].strip()
+                    tag = parsed.query.get("tag", [""])[0].strip()
+                    access_level = parsed.query.get("access_level", [""])[0].strip()
+                    category_name = parsed.query.get("category_name", [""])[0].strip()
+                    author = parsed.query.get("author", [""])[0].strip()
+                    notification_status = parsed.query.get("notification_status", [""])[0].strip()
+                    bridge._write_json(
+                        self,
+                        HTTPStatus.OK,
+                        {
+                            "ok": True,
+                            **bridge.monitor.database.list_topics(
+                                page=page,
+                                page_size=page_size,
+                                keyword=keyword,
+                                tag=tag,
+                                access_level=access_level,
+                                category_name=category_name,
+                                author=author,
+                                notification_status=notification_status,
+                            ),
                         },
                     )
                     return
@@ -123,6 +169,27 @@ class ExtensionBridgeServer:
                         return
                     bridge.monitor.refresh_notifier()
                     bridge._write_json(self, HTTPStatus.OK, {"ok": True, "config": config.to_dict()})
+                    return
+                if parsed.path == "/api/bridge/autostart":
+                    try:
+                        payload = bridge._read_json(self)
+                        manager = WindowsStartupManager(bridge.settings)
+                        if bool(payload.get("enabled")):
+                            status = manager.install(
+                                use_tray=bool(payload.get("use_tray", True)),
+                                launch_browser=bool(payload.get("launch_browser")),
+                                browser_url=str(payload.get("browser_url") or "").strip() or None,
+                            )
+                        else:
+                            status = manager.remove()
+                    except (RuntimeError, ValueError) as exc:
+                        bridge._write_json(
+                            self,
+                            HTTPStatus.BAD_REQUEST,
+                            {"ok": False, "error": "invalid_autostart_config", "detail": str(exc)},
+                        )
+                        return
+                    bridge._write_json(self, HTTPStatus.OK, {"ok": True, "status": status.to_dict()})
                     return
                 bridge._write_json(self, HTTPStatus.NOT_FOUND, {"ok": False, "error": "not_found"})
 
@@ -202,6 +269,9 @@ class ExtensionBridgeServer:
 
                 logged_in = bool(payload.get("logged_in"))
                 sync_run_id = str(payload.get("sync_run_id") or "").strip()
+                streaming = bool(payload.get("streaming"))
+                final_batch = bool(payload.get("final_batch"))
+                batch_index = max(1, int(payload.get("batch_index") or 1))
                 bridge.monitor.database.set_state("bridge_last_sync_at", utc_now())
                 bridge.monitor.database.set_state("bridge_logged_in", "1" if logged_in else "0")
 
@@ -260,7 +330,15 @@ class ExtensionBridgeServer:
                     percent=89,
                     stage="bridge-ingest",
                     label="接收扩展数据",
-                    detail=f"收到 {len(topic_documents)} 个主题，正在交给本地服务处理",
+                    detail=(
+                        "所有主题批次已提交，正在更新同步游标"
+                        if streaming and final_batch and not topic_documents
+                        else (
+                            f"收到第 {batch_index} 批 {len(topic_documents)} 个主题，正在交给本地服务处理"
+                            if streaming
+                            else f"收到 {len(topic_documents)} 个主题，正在交给本地服务处理"
+                        )
+                    ),
                 )
 
                 def on_monitor_progress(progress: dict[str, Any]) -> None:
@@ -275,12 +353,42 @@ class ExtensionBridgeServer:
 
                 try:
                     with bridge._lock:
+                        if streaming:
+                            session = bridge._stream_sessions.setdefault(
+                                sync_run_id,
+                                {
+                                    "max_topic_id": 0,
+                                    "stored_count": 0,
+                                    "batch_count": 0,
+                                },
+                            )
+                        else:
+                            session = {
+                                "max_topic_id": 0,
+                                "stored_count": 0,
+                                "batch_count": 0,
+                            }
                         stored = bridge.monitor.ingest_topic_documents(
                             topic_documents,
                             category_map=category_map,
                             progress_callback=on_monitor_progress,
+                            update_last_seen=not streaming,
+                            emit_completion_event=not streaming,
                         )
+                        if stored:
+                            session["max_topic_id"] = max(
+                                int(session.get("max_topic_id") or 0),
+                                max(int(payload.topic_id) for payload in stored),
+                            )
+                        session["stored_count"] = int(session.get("stored_count") or 0) + len(stored)
+                        if topic_documents:
+                            session["batch_count"] = int(session.get("batch_count") or 0) + 1
+                        if streaming and final_batch and session["max_topic_id"]:
+                            bridge.monitor.database.set_last_seen_topic_id(int(session["max_topic_id"]))
                 except Exception as exc:
+                    if streaming and sync_run_id:
+                        with bridge._lock:
+                            bridge._stream_sessions.pop(sync_run_id, None)
                     bridge._set_progress_state(
                         sync_run_id=sync_run_id,
                         in_progress=False,
@@ -296,14 +404,31 @@ class ExtensionBridgeServer:
                     )
                     return
 
-                bridge._set_progress_state(
-                    sync_run_id=sync_run_id,
-                    in_progress=False,
-                    percent=100,
-                    stage="completed",
-                    label="同步完成",
-                    detail=f"本轮新增入库 {len(stored)} 个主题",
-                )
+                stored_count_total = int(session.get("stored_count") or 0)
+                if streaming and not final_batch:
+                    bridge._set_progress_state(
+                        sync_run_id=sync_run_id,
+                        in_progress=True,
+                        percent=89,
+                        stage="bridge-ingest",
+                        label="当前批次处理完成",
+                        detail=(
+                            f"第 {batch_index} 批已完成，本轮累计入库 {stored_count_total} 个主题，"
+                            "继续抓取后续页面"
+                        ),
+                    )
+                else:
+                    bridge._set_progress_state(
+                        sync_run_id=sync_run_id,
+                        in_progress=False,
+                        percent=100,
+                        stage="completed",
+                        label="同步完成",
+                        detail=f"本轮累计入库 {stored_count_total if streaming else len(stored)} 个主题",
+                    )
+                    if streaming and sync_run_id:
+                        with bridge._lock:
+                            bridge._stream_sessions.pop(sync_run_id, None)
 
                 bridge._write_json(
                     self,
@@ -311,6 +436,7 @@ class ExtensionBridgeServer:
                     {
                         "ok": True,
                         "stored_count": len(stored),
+                        "stored_count_total": stored_count_total,
                         "last_seen_topic_id": bridge.monitor.database.get_last_seen_topic_id(),
                         "logged_in": logged_in,
                     },
@@ -332,9 +458,24 @@ class ExtensionBridgeServer:
         finally:
             self.close()
 
+    def stop(self) -> None:
+        try:
+            self._server.shutdown()
+        except Exception:
+            pass
+        self.close()
+
     def close(self) -> None:
+        with self._close_lock:
+            if self._closed:
+                return
+            self._closed = True
         try:
             self._server.server_close()
+        except Exception:
+            pass
+        try:
+            self.monitor.close()
         except Exception:
             pass
         self.monitor.close()
@@ -359,6 +500,26 @@ class ExtensionBridgeServer:
     def _parse_path(self, raw_path: str) -> Any:
         parsed = urlsplit(raw_path)
         return SimpleNamespace(path=parsed.path, query=parse_qs(parsed.query))
+
+    def _read_int_query_param(
+        self,
+        query: dict[str, list[str]],
+        key: str,
+        *,
+        default: int,
+        minimum: int | None = None,
+        maximum: int | None = None,
+    ) -> int:
+        raw_value = query.get(key, [str(default)])[0]
+        try:
+            value = int(raw_value)
+        except (TypeError, ValueError):
+            value = default
+        if minimum is not None:
+            value = max(minimum, value)
+        if maximum is not None:
+            value = min(maximum, value)
+        return value
 
     def _empty_progress_state(self, *, sync_run_id: str = "") -> dict[str, Any]:
         return {

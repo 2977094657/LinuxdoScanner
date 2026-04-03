@@ -1,23 +1,32 @@
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from dataclasses import dataclass
+import importlib
 import logging
+import random
 import time
 from typing import Any
 
 from .ai_config import AIConfigManager
 from .classifier import TopicClassifier
-from .discourse import APIAccessError, BrowserSessionManager, DiscourseAPIClient, build_topic_payload
 from .models import TopicPayload
 from .notify import NotificationDispatcher
 from .notification_config import NotificationConfigManager
 from .settings import Settings
 from .storage import Database
+from .topic_payload_builder import build_topic_payload
 
 
 LOGGER = logging.getLogger(__name__)
 
 ProgressCallback = Callable[[dict[str, Any]], None]
+
+
+@dataclass(slots=True)
+class PayloadStoreOutcome:
+    max_topic_id: int
+    saw_successful_ai_request: bool
 
 
 class LinuxDoMonitor:
@@ -32,8 +41,14 @@ class LinuxDoMonitor:
             settings,
             notification_config=self.notification_config_manager.load_config(),
         )
-        self.session_manager = BrowserSessionManager(settings) if enable_client else None
-        self.client = DiscourseAPIClient(settings, self.session_manager) if enable_client else None
+        self.session_manager = None
+        self.client = None
+        self._api_access_error_cls: type[Exception] | None = None
+        if enable_client:
+            discourse = importlib.import_module(".discourse", package=__package__)
+            self._api_access_error_cls = discourse.APIAccessError
+            self.session_manager = discourse.BrowserSessionManager(settings)
+            self.client = discourse.DiscourseAPIClient(settings, self.session_manager)
 
     def close(self) -> None:
         if self.client is not None:
@@ -68,19 +83,18 @@ class LinuxDoMonitor:
         category_map = self.client.load_categories()
         last_seen_topic_id = self.database.get_last_seen_topic_id()
         bootstrap_limit = bootstrap_limit or self.settings.bootstrap_limit
-        summaries = self._collect_new_topic_summaries(last_seen_topic_id, bootstrap_limit)
-
-        if not summaries:
-            LOGGER.info("No new topics found.")
-            return []
-
+        llm_batch_size = self._llm_batch_size()
+        max_topic_id = last_seen_topic_id or 0
+        pending_retry_topic_ids = set(self.database.list_pending_ai_retry_topic_ids())
+        retried_previous_failures = False
         payloads: list[TopicPayload] = []
-        for summary in summaries:
+        pending_payloads: list[TopicPayload] = []
+        for summary in self._iter_new_topic_summaries(last_seen_topic_id, bootstrap_limit):
             topic_id = int(summary["id"])
             detail = None
             try:
                 detail = self.client.fetch_topic_detail(topic_id=topic_id, slug=summary["slug"])
-            except APIAccessError as exc:
+            except self._api_access_error_cls as exc:
                 LOGGER.warning("Topic %s detail fetch failed, saving summary only: %s", topic_id, exc)
             payload = build_topic_payload(
                 base_url=self.settings.base_url,
@@ -89,7 +103,44 @@ class LinuxDoMonitor:
                 category_map=category_map,
             )
             payloads.append(payload)
-        self._store_payloads(payloads, previous_last_seen_topic_id=last_seen_topic_id)
+            pending_payloads.append(payload)
+            if len(pending_payloads) < llm_batch_size:
+                continue
+
+            outcome = self._store_payload_batch(
+                pending_payloads,
+                previous_last_seen_topic_id=max_topic_id,
+                pending_retry_topic_ids=pending_retry_topic_ids,
+                retry_pending_failures=False,
+                update_last_seen=False,
+                refresh_components=False,
+            )
+            max_topic_id = max(max_topic_id, outcome.max_topic_id)
+            if not retried_previous_failures and outcome.saw_successful_ai_request and pending_retry_topic_ids:
+                self._retry_previously_failed_payloads(pending_retry_topic_ids)
+                retried_previous_failures = True
+            pending_payloads = []
+
+        if not payloads:
+            LOGGER.info("No new topics found.")
+            return []
+
+        if pending_payloads:
+            outcome = self._store_payload_batch(
+                pending_payloads,
+                previous_last_seen_topic_id=max_topic_id,
+                pending_retry_topic_ids=pending_retry_topic_ids,
+                retry_pending_failures=False,
+                update_last_seen=False,
+                refresh_components=False,
+            )
+            max_topic_id = max(max_topic_id, outcome.max_topic_id)
+            if not retried_previous_failures and outcome.saw_successful_ai_request and pending_retry_topic_ids:
+                self._retry_previously_failed_payloads(pending_retry_topic_ids)
+                retried_previous_failures = True
+
+        if max_topic_id:
+            self.database.set_last_seen_topic_id(max_topic_id)
         return payloads
 
     def ingest_topic_documents(
@@ -97,6 +148,9 @@ class LinuxDoMonitor:
         topic_documents: list[dict[str, Any]],
         category_map: dict[int, str] | None = None,
         progress_callback: ProgressCallback | None = None,
+        *,
+        update_last_seen: bool = True,
+        emit_completion_event: bool = True,
     ) -> list[TopicPayload]:
         self.refresh_classifier()
         self.refresh_notifier()
@@ -109,7 +163,13 @@ class LinuxDoMonitor:
             label="整理服务端任务",
             detail=f"收到 {len(topic_documents)} 个主题，正在筛选新增内容",
         )
+        llm_batch_size = self._llm_batch_size()
+        max_topic_id = last_seen_topic_id or 0
+        pending_retry_topic_ids = set(self.database.list_pending_ai_retry_topic_ids())
+        retried_previous_failures = False
+        batch_index = 0
         payloads: list[TopicPayload] = []
+        pending_payloads: list[TopicPayload] = []
         for document in topic_documents:
             summary = document.get("summary") or {}
             if "id" not in summary or "slug" not in summary or "title" not in summary:
@@ -127,29 +187,86 @@ class LinuxDoMonitor:
                     category_map=category_map,
                 )
             )
+            pending_payloads.append(payloads[-1])
+            if len(pending_payloads) < llm_batch_size:
+                continue
 
-        if payloads:
+            batch_index += 1
             self._emit_progress(
                 progress_callback,
                 percent=90,
                 stage="bridge-ingest",
-                label="整理新增主题",
-                detail=f"已筛出 {len(payloads)} 个新主题，准备进入 AI 识别",
+                label="达到批次阈值，立即提交 AI",
+                detail=(
+                    f"已筛出 {len(payloads)} 个新主题，"
+                    f"正在处理第 {batch_index} 批（{len(pending_payloads)} 个）"
+                ),
             )
-        else:
+            outcome = self._store_payload_batch(
+                pending_payloads,
+                previous_last_seen_topic_id=max_topic_id,
+                pending_retry_topic_ids=pending_retry_topic_ids,
+                retry_pending_failures=False,
+                update_last_seen=False,
+                refresh_components=False,
+            )
+            max_topic_id = max(max_topic_id, outcome.max_topic_id)
+            if not retried_previous_failures and outcome.saw_successful_ai_request and pending_retry_topic_ids:
+                self._retry_previously_failed_payloads(
+                    pending_retry_topic_ids,
+                    progress_callback=progress_callback,
+                )
+                retried_previous_failures = True
+            pending_payloads = []
+
+        if not payloads:
+            if emit_completion_event:
+                self._emit_progress(
+                    progress_callback,
+                    percent=99,
+                    stage="bridge-ingest",
+                    label="没有发现新主题",
+                    detail="当前批次没有需要入库的新主题",
+                )
+            return []
+
+        if pending_payloads:
+            batch_index += 1
             self._emit_progress(
                 progress_callback,
-                percent=99,
+                percent=90,
                 stage="bridge-ingest",
-                label="没有发现新主题",
-                detail="当前批次没有需要入库的新主题",
+                label="处理最后一批 AI 请求",
+                detail=(
+                    f"共筛出 {len(payloads)} 个新主题，"
+                    f"正在处理最后一批（第 {batch_index} 批，{len(pending_payloads)} 个）"
+                ),
             )
+            outcome = self._store_payload_batch(
+                pending_payloads,
+                previous_last_seen_topic_id=max_topic_id,
+                pending_retry_topic_ids=pending_retry_topic_ids,
+                retry_pending_failures=False,
+                update_last_seen=False,
+                refresh_components=False,
+            )
+            max_topic_id = max(max_topic_id, outcome.max_topic_id)
+            if not retried_previous_failures and outcome.saw_successful_ai_request and pending_retry_topic_ids:
+                self._retry_previously_failed_payloads(
+                    pending_retry_topic_ids,
+                    progress_callback=progress_callback,
+                )
 
-        self._store_payloads(
-            payloads,
-            previous_last_seen_topic_id=last_seen_topic_id,
-            progress_callback=progress_callback,
-        )
+        if update_last_seen and max_topic_id:
+            self.database.set_last_seen_topic_id(max_topic_id)
+        if emit_completion_event:
+            self._emit_progress(
+                progress_callback,
+                percent=100,
+                stage="completed",
+                label="同步完成",
+                detail=f"本轮新增入库 {len(payloads)} 个主题",
+            )
         return payloads
 
     def _collect_new_topic_summaries(
@@ -157,33 +274,93 @@ class LinuxDoMonitor:
         last_seen_topic_id: int | None,
         bootstrap_limit: int,
     ) -> list[dict[str, Any]]:
-        new_topics: list[dict[str, Any]] = []
+        return list(self._iter_new_topic_summaries(last_seen_topic_id, bootstrap_limit))
+
+    def _iter_new_topic_summaries(
+        self,
+        last_seen_topic_id: int | None,
+        bootstrap_limit: int,
+    ) -> Iterator[dict[str, Any]]:
         seen_ids: set[int] = set()
+        next_page_number = 0
+        round_index = 0
+        yielded_count = 0
 
-        for page_number in range(self.settings.max_pages_per_run):
-            data = self.client.fetch_latest_page(page_number)
-            topics = data.get("topic_list", {}).get("topics", [])
-            if not topics:
-                break
+        while True:
+            round_index += 1
+            round_found_topics = False
 
-            for topic in topics:
-                topic_id = int(topic["id"])
-                if topic_id in seen_ids:
-                    continue
-                seen_ids.add(topic_id)
+            for page_offset in range(self.settings.max_pages_per_run):
+                page_number = next_page_number
+                next_page_number += 1
 
-                if last_seen_topic_id is None:
-                    new_topics.append(topic)
-                    if len(new_topics) >= bootstrap_limit:
-                        return new_topics
-                    continue
+                if page_offset > 0:
+                    self._sleep_for_random_delay(
+                        minimum_seconds=self.settings.page_request_delay_min_seconds,
+                        maximum_seconds=self.settings.page_request_delay_max_seconds,
+                        log_template="Waiting %s seconds before requesting page %s.",
+                        log_args=(page_number + 1,),
+                    )
 
-                if topic_id <= last_seen_topic_id:
-                    return new_topics
+                data = self.client.fetch_latest_page(page_number)
+                topics = data.get("topic_list", {}).get("topics", [])
+                if not topics:
+                    return
 
-                new_topics.append(topic)
+                round_found_topics = True
+                for topic in topics:
+                    topic_id = int(topic["id"])
+                    if topic_id in seen_ids:
+                        continue
+                    seen_ids.add(topic_id)
 
-        return new_topics
+                    if last_seen_topic_id is None:
+                        yielded_count += 1
+                        yield topic
+                        if yielded_count >= bootstrap_limit:
+                            return
+                        continue
+
+                    if topic_id <= last_seen_topic_id:
+                        return
+
+                    yield topic
+
+            if not round_found_topics:
+                return
+
+            self._sleep_for_random_delay(
+                minimum_seconds=self.settings.round_delay_min_seconds,
+                maximum_seconds=self.settings.round_delay_max_seconds,
+                log_template="Waiting %s seconds after completing round %s before continuing to page %s.",
+                log_args=(round_index, next_page_number + 1),
+            )
+
+    def _sleep_for_random_delay(
+        self,
+        *,
+        minimum_seconds: int,
+        maximum_seconds: int,
+        log_template: str,
+        log_args: tuple[Any, ...] = (),
+    ) -> int:
+        minimum = max(0, int(minimum_seconds))
+        maximum = max(0, int(maximum_seconds))
+        if maximum < minimum:
+            minimum, maximum = maximum, minimum
+        if maximum <= 0:
+            return 0
+
+        delay_seconds = random.randint(minimum, maximum)
+        if delay_seconds <= 0:
+            return 0
+
+        LOGGER.info(log_template, delay_seconds, *log_args)
+        time.sleep(delay_seconds)
+        return delay_seconds
+
+    def _llm_batch_size(self) -> int:
+        return max(1, int(getattr(self.settings, "llm_batch_size", 1) or 1))
 
     def _store_payloads(
         self,
@@ -202,12 +379,41 @@ class LinuxDoMonitor:
             )
             return
 
-        self.refresh_classifier()
-        self.refresh_notifier()
+        self._store_payload_batch(
+            payloads,
+            previous_last_seen_topic_id=previous_last_seen_topic_id,
+            progress_callback=progress_callback,
+        )
+
+        self._emit_progress(
+            progress_callback,
+            percent=100,
+            stage="completed",
+            label="同步完成",
+            detail=f"本轮新增入库 {len(payloads)} 个主题",
+        )
+
+    def _store_payload_batch(
+        self,
+        payloads: list[TopicPayload],
+        *,
+        previous_last_seen_topic_id: int | None,
+        progress_callback: ProgressCallback | None = None,
+        pending_retry_topic_ids: set[int] | None = None,
+        retry_pending_failures: bool = True,
+        update_last_seen: bool = True,
+        refresh_components: bool = True,
+    ) -> PayloadStoreOutcome:
+        if refresh_components:
+            self.refresh_classifier()
+            self.refresh_notifier()
         max_topic_id = previous_last_seen_topic_id or 0
-        pending_retry_topic_ids = set(self.database.list_pending_ai_retry_topic_ids())
+        if pending_retry_topic_ids is None:
+            pending_retry_topic_ids = set(self.database.list_pending_ai_retry_topic_ids())
+        else:
+            pending_retry_topic_ids = set(pending_retry_topic_ids)
         total_payloads = len(payloads)
-        llm_batch_size = max(1, int(getattr(self.settings, "llm_batch_size", 1) or 1))
+        llm_batch_size = self._llm_batch_size()
         expected_batch_count = max(1, (total_payloads + llm_batch_size - 1) // llm_batch_size)
         self._emit_progress(
             progress_callback,
@@ -305,10 +511,10 @@ class LinuxDoMonitor:
                     detail=f"已写入 {index}/{total_payloads} 个主题",
                 )
 
-        if max_topic_id:
+        if update_last_seen and max_topic_id:
             self.database.set_last_seen_topic_id(max_topic_id)
 
-        if saw_successful_ai_request and pending_retry_topic_ids:
+        if retry_pending_failures and saw_successful_ai_request and pending_retry_topic_ids:
             self._emit_progress(
                 progress_callback,
                 percent=97,
@@ -358,12 +564,9 @@ class LinuxDoMonitor:
                 detail="本轮没有命中通知条件的主题",
             )
 
-        self._emit_progress(
-            progress_callback,
-            percent=100,
-            stage="completed",
-            label="同步完成",
-            detail=f"本轮新增入库 {len(payloads)} 个主题",
+        return PayloadStoreOutcome(
+            max_topic_id=max_topic_id,
+            saw_successful_ai_request=saw_successful_ai_request,
         )
 
     def _retry_previously_failed_payloads(

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import sqlite3
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -416,6 +417,151 @@ class Database:
             ).fetchall()
         return list(rows)
 
+    def list_topics(
+        self,
+        *,
+        page: int = 1,
+        page_size: int = 20,
+        keyword: str = "",
+        tag: str = "",
+        access_level: str = "",
+        category_name: str = "",
+        author: str = "",
+        notification_status: str = "",
+    ) -> dict[str, Any]:
+        page_size = max(1, min(100, int(page_size or 20)))
+        requested_page = max(1, int(page or 1))
+        keyword = str(keyword or "").strip()
+        tag = str(tag or "").strip()
+        access_level = str(access_level or "").strip()
+        category_name = str(category_name or "").strip()
+        author = str(author or "").strip()
+        notification_status = str(notification_status or "").strip().lower()
+
+        where_clauses: list[str] = []
+        parameters: list[Any] = []
+
+        if keyword:
+            like_pattern = f"%{keyword}%"
+            searchable_columns = [
+                "title",
+                "url",
+                "category_name",
+                "author_username",
+                "author_display_name",
+                "first_post_html",
+                "external_links_json",
+                "ai_provider",
+                "ai_label",
+                "ai_summary",
+                "ai_reasons_json",
+                "ai_labels_json",
+            ]
+            where_clauses.append(
+                "(" + " OR ".join(f"COALESCE({column}, '') LIKE ?" for column in searchable_columns) + ")"
+            )
+            parameters.extend([like_pattern] * len(searchable_columns))
+
+        if tag:
+            where_clauses.append("COALESCE(tags_json, '[]') LIKE ?")
+            parameters.append(f"%{json.dumps(tag, ensure_ascii=False)}%")
+
+        if access_level:
+            where_clauses.append("COALESCE(access_level, 'public') = ?")
+            parameters.append(access_level)
+
+        if category_name:
+            where_clauses.append("COALESCE(category_name, '') = ?")
+            parameters.append(category_name)
+
+        if author:
+            like_pattern = f"%{author}%"
+            where_clauses.append(
+                "("
+                "COALESCE(author_username, '') LIKE ?"
+                " OR COALESCE(author_display_name, '') LIKE ?"
+                ")"
+            )
+            parameters.extend([like_pattern, like_pattern])
+
+        if notification_status == "pending":
+            where_clauses.append("requires_notification = 1 AND notification_sent_at IS NULL")
+        elif notification_status in {"notified", "sent"}:
+            where_clauses.append("requires_notification = 1 AND notification_sent_at IS NOT NULL")
+        elif notification_status in {"not_required", "skipped", "muted"}:
+            where_clauses.append("requires_notification = 0")
+
+        where_sql = f" WHERE {' AND '.join(where_clauses)}" if where_clauses else ""
+
+        with self.connect() as conn:
+            total = int(
+                conn.execute(
+                    f"SELECT COUNT(*) AS count FROM topics{where_sql}",
+                    parameters,
+                ).fetchone()["count"]
+            )
+            total_pages = max(1, math.ceil(total / page_size)) if total else 1
+            page = min(requested_page, total_pages)
+            offset = (page - 1) * page_size
+            rows = conn.execute(
+                f"""
+                SELECT *
+                FROM topics
+                {where_sql}
+                ORDER BY
+                    COALESCE(created_at, fetched_at) DESC,
+                    topic_id DESC
+                LIMIT ?
+                OFFSET ?
+                """,
+                (*parameters, page_size, offset),
+            ).fetchall()
+
+        return {
+            "items": [self._row_to_topic_dict(row) for row in rows],
+            "pagination": {
+                "page": page,
+                "page_size": page_size,
+                "total": total,
+                "total_pages": total_pages,
+            },
+            "filters": self.get_topic_filter_options(),
+        }
+
+    def get_topic_filter_options(self) -> dict[str, list[str]]:
+        with self.connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT category_name, access_level, tags_json
+                FROM topics
+                ORDER BY COALESCE(created_at, fetched_at) DESC, topic_id DESC
+                """
+            ).fetchall()
+
+        categories: set[str] = set()
+        access_levels: set[str] = set()
+        tags: set[str] = set()
+
+        for row in rows:
+            category_name = str(row["category_name"] or "").strip()
+            if category_name:
+                categories.add(category_name)
+
+            level = str(row["access_level"] or "public").strip()
+            if level:
+                access_levels.add(level)
+
+            for item in self._load_json_list(row["tags_json"]):
+                normalized = str(item or "").strip()
+                if normalized:
+                    tags.add(normalized)
+
+        return {
+            "categories": sorted(categories, key=str.casefold),
+            "access_levels": sorted(access_levels, key=str.casefold),
+            "tags": sorted(tags, key=str.casefold),
+        }
+
     def mark_topics_notified(self, topic_ids: Iterable[int]) -> None:
         topic_ids = list(topic_ids)
         if not topic_ids:
@@ -543,3 +689,45 @@ class Database:
             last_failed_at=row["last_failed_at"],
             resolved_at=row["resolved_at"],
         )
+
+    def _row_to_topic_dict(self, row: sqlite3.Row) -> dict[str, Any]:
+        return {
+            "topic_id": int(row["topic_id"]),
+            "slug": row["slug"],
+            "title": row["title"],
+            "url": row["url"],
+            "category_id": row["category_id"],
+            "category_name": row["category_name"],
+            "tags_json": self._load_json_list(row["tags_json"]),
+            "created_at": row["created_at"],
+            "last_posted_at": row["last_posted_at"],
+            "author_username": row["author_username"],
+            "author_display_name": row["author_display_name"],
+            "author_avatar_url": row["author_avatar_url"],
+            "first_post_html": row["first_post_html"],
+            "topic_image_url": row["topic_image_url"],
+            "image_urls_json": self._load_json_list(row["image_urls_json"]),
+            "external_links_json": self._load_json_list(row["external_links_json"]),
+            "reply_count": row["reply_count"],
+            "like_count": row["like_count"],
+            "view_count": row["view_count"],
+            "word_count": row["word_count"],
+            "access_level": row["access_level"],
+            "fetched_at": row["fetched_at"],
+            "ai_provider": row["ai_provider"],
+            "ai_label": row["ai_label"],
+            "ai_summary": row["ai_summary"],
+            "ai_reasons_json": self._load_json_list(row["ai_reasons_json"]),
+            "ai_labels_json": self._load_json_list(row["ai_labels_json"]),
+            "requires_notification": bool(row["requires_notification"]),
+            "notification_sent_at": row["notification_sent_at"],
+        }
+
+    def _load_json_list(self, value: Any) -> list[Any]:
+        if not value:
+            return []
+        try:
+            loaded = json.loads(value)
+        except (TypeError, json.JSONDecodeError):
+            return []
+        return loaded if isinstance(loaded, list) else []
