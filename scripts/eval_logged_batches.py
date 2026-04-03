@@ -13,7 +13,7 @@ from linuxdoscanner.ai_config import AIProviderConfig
 from linuxdoscanner.classifier import TopicClassifier
 from linuxdoscanner.discourse import strip_html
 from linuxdoscanner.models import TopicPayload
-from linuxdoscanner.settings import Settings
+from linuxdoscanner.settings import DEFAULT_EVAL_REPORT_PATH, Settings
 
 
 BATCH_SPECS = [
@@ -70,7 +70,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--output",
         type=Path,
-        default=Path("data/model_eval_logged_batches_deepseek_minimax.json"),
+        default=DEFAULT_EVAL_REPORT_PATH,
         help="Where to write the combined JSON report.",
     )
     parser.add_argument("--base-url", help="Override the OpenAI-compatible base URL for this run.")
@@ -194,6 +194,7 @@ def serialize_analysis(payload: TopicPayload, analysis: Any) -> dict[str, Any]:
 
 def build_settings() -> Settings:
     settings = Settings.from_env()
+    settings.ensure_directories()
     settings.llm_batch_size = 10
     return settings
 

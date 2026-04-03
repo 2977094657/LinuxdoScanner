@@ -19,6 +19,25 @@ from .settings import Settings
 LOGGER = logging.getLogger(__name__)
 
 
+def _hidden_subprocess_kwargs() -> dict[str, object]:
+    if os.name != "nt":
+        return {}
+
+    kwargs: dict[str, object] = {}
+    creationflags = int(getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    if creationflags:
+        kwargs["creationflags"] = creationflags
+
+    startupinfo_factory = getattr(subprocess, "STARTUPINFO", None)
+    if startupinfo_factory is not None:
+        startupinfo = startupinfo_factory()
+        startupinfo.dwFlags |= int(getattr(subprocess, "STARTF_USESHOWWINDOW", 0))
+        startupinfo.wShowWindow = 0
+        kwargs["startupinfo"] = startupinfo
+
+    return kwargs
+
+
 class EmailNotifier:
     def __init__(self, settings: Settings):
         self.settings = settings
@@ -99,9 +118,18 @@ class WindowsToastNotifier:
             return []
 
         sent_ids: list[int] = []
+        errors: list[str] = []
         for topic in topics:
-            self._show_toast(topic)
+            try:
+                self._show_toast(topic)
+            except Exception as exc:
+                topic_id = int(topic["topic_id"])
+                LOGGER.warning("Windows toast notification failed for topic %s: %s", topic_id, exc)
+                errors.append(f"{topic_id}:{exc}")
+                continue
             sent_ids.append(int(topic["topic_id"]))
+        if errors and not sent_ids:
+            raise RuntimeError("; ".join(errors))
         return sent_ids
 
     def _show_toast(self, topic: Row) -> None:
@@ -127,6 +155,7 @@ class WindowsToastNotifier:
             ],
             check=True,
             timeout=15,
+            **_hidden_subprocess_kwargs(),
         )
 
     def _build_powershell_script(self, *, title: str, body: str) -> str:
@@ -166,9 +195,18 @@ class FeishuNotifier:
             return []
 
         sent_ids: list[int] = []
+        errors: list[str] = []
         for topic in topics:
-            self._send_topic(topic)
+            try:
+                self._send_topic(topic)
+            except Exception as exc:
+                topic_id = int(topic["topic_id"])
+                LOGGER.warning("Feishu notification failed for topic %s: %s", topic_id, exc)
+                errors.append(f"{topic_id}:{exc}")
+                continue
             sent_ids.append(int(topic["topic_id"]))
+        if errors and not sent_ids:
+            raise RuntimeError("; ".join(errors))
         return sent_ids
 
     def _send_topic(self, topic: Row) -> None:
@@ -194,6 +232,7 @@ class FeishuNotifier:
             command,
             check=True,
             timeout=30,
+            **_hidden_subprocess_kwargs(),
         )
 
     def send_markdown(self, body: str) -> None:
@@ -216,6 +255,7 @@ class FeishuNotifier:
             command,
             check=True,
             timeout=30,
+            **_hidden_subprocess_kwargs(),
         )
 
     def _build_markdown_body(self, topic: Row) -> str:

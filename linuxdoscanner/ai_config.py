@@ -24,15 +24,30 @@ DEFAULT_FOCUS_KEYWORDS = [
 DEFAULT_FOCUS_PROMPT = (
     "优先识别高密度、可执行、对 AI 使用和判断有直接价值的主题。"
     "当前重点关注 AI 前沿新闻与模型更新、实验复现、辟谣实测、Codex 或 Claude Code 使用技巧，"
+    "以及标题、摘要或正文明确给出具体价值点的福利、公益站、资源信息。"
+    "对 Linux.do 的福利帖，不必把完整领取步骤当成唯一条件；只要标题或摘要已明确写出可领福利、折扣、额度、入口、平台等信息，且正文不矛盾，就可以视为有效信号。"
+    "正文证据仍优先于标题；注册成功庆祝、闲聊、女装整活、树洞、感情和生活水贴不要误判。"
+)
+LEGACY_DEFAULT_FOCUS_PROMPTS = (
+    "优先识别高密度、可执行、对 AI 使用和判断有直接价值的主题。"
+    "当前重点关注 AI 前沿新闻与模型更新、实验复现、辟谣实测、Codex 或 Claude Code 使用技巧，"
     "以及有明确路径或价值点的福利、公益站、资源信息。"
-    "正文证据必须优先于标题；注册成功庆祝、闲聊、女装整活、树洞、感情和生活水贴不要误判。"
+    "正文证据必须优先于标题；注册成功庆祝、闲聊、女装整活、树洞、感情和生活水贴不要误判。",
 )
 DEFAULT_NOTIFICATION_PROMPT = (
     "只有当主题具备较强时效性、信息密度和行动价值时，才标记为需要通知。"
     "AI 相关新闻、严谨实验或辟谣实测、Codex/Claude Code 使用技巧，应明显倾向通知；"
-    "正文直接给出福利路径、公益站入口、API 地址、密钥、额度、模型范围或具体使用方式的资源贴，也应明显倾向通知；"
+    "福利或公益站资源贴，只要标题、摘要或正文明确表明存在可领取福利、折扣、额度、入口、平台、CDK/邀请码、模型范围、开放规则等具体价值点，且不是单纯求助、猜测或空泛转述，即使没有完整领取步骤，也应明显倾向通知；"
+    "Linux.do 上标题明确写福利的帖子通常不是标题党，可把这类标题视为强信号，但若正文明确否定或与标题矛盾，仍以正文为准；"
     "注册庆祝、闲聊、女装整活、感情贴、树洞和纯吐槽不要通知。"
     "最终是否推送只看 requires_notification 这一个字段，拿不准时宁可标 false。"
+)
+LEGACY_DEFAULT_NOTIFICATION_PROMPTS = (
+    "只有当主题具备较强时效性、信息密度和行动价值时，才标记为需要通知。"
+    "AI 相关新闻、严谨实验或辟谣实测、Codex/Claude Code 使用技巧，应明显倾向通知；"
+    "正文直接给出福利路径、公益站入口、API 地址、密钥、额度、模型范围或具体使用方式的资源贴，也应明显倾向通知；"
+    "注册庆祝、闲聊、女装整活、感情贴、树洞和纯吐槽不要通知。"
+    "最终是否推送只看 requires_notification 这一个字段，拿不准时宁可标 false。",
 )
 _MISSING = object()
 
@@ -68,13 +83,15 @@ class AIProviderConfig:
                 payload.get("focus_keywords", _MISSING),
                 default=DEFAULT_FOCUS_KEYWORDS,
             ),
-            focus_prompt=_normalize_text(
+            focus_prompt=_normalize_prompt_text(
                 payload.get("focus_prompt", _MISSING),
                 default=DEFAULT_FOCUS_PROMPT,
+                legacy_defaults=LEGACY_DEFAULT_FOCUS_PROMPTS,
             ),
-            notification_prompt=_normalize_text(
+            notification_prompt=_normalize_prompt_text(
                 payload.get("notification_prompt", _MISSING),
                 default=DEFAULT_NOTIFICATION_PROMPT,
+                legacy_defaults=LEGACY_DEFAULT_NOTIFICATION_PROMPTS,
             ),
         )
 
@@ -112,8 +129,16 @@ class AIProviderConfig:
             last_model_sync_error=_optional_str(self.last_model_sync_error),
             last_model_sync_at=_optional_str(self.last_model_sync_at),
             focus_keywords=_normalize_text_list(self.focus_keywords),
-            focus_prompt=_normalize_text(self.focus_prompt),
-            notification_prompt=_normalize_text(self.notification_prompt),
+            focus_prompt=_normalize_prompt_text(
+                self.focus_prompt,
+                default=DEFAULT_FOCUS_PROMPT,
+                legacy_defaults=LEGACY_DEFAULT_FOCUS_PROMPTS,
+            ),
+            notification_prompt=_normalize_prompt_text(
+                self.notification_prompt,
+                default=DEFAULT_NOTIFICATION_PROMPT,
+                legacy_defaults=LEGACY_DEFAULT_NOTIFICATION_PROMPTS,
+            ),
         )
 
     @property
@@ -278,6 +303,18 @@ def _normalize_text(value: Any, default: str | object = _MISSING) -> str:
     if value is None:
         return ""
     return str(value).strip()
+
+
+def _normalize_prompt_text(
+    value: Any,
+    *,
+    default: str,
+    legacy_defaults: tuple[str, ...] = (),
+) -> str:
+    normalized = _normalize_text(value, default=default)
+    if normalized in legacy_defaults:
+        return default
+    return normalized
 
 
 def _optional_str(value: Any) -> str | None:

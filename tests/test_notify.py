@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -7,7 +8,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from linuxdoscanner.notification_config import NotificationConfig
-from linuxdoscanner.notify import FeishuNotifier
+from linuxdoscanner.notify import FeishuNotifier, WindowsToastNotifier, _hidden_subprocess_kwargs
 
 
 class FeishuNotifierTests(unittest.TestCase):
@@ -71,6 +72,79 @@ class FeishuNotifierTests(unittest.TestCase):
             self.assertEqual(command[0], str(node_executable))
             self.assertEqual(command[1], str(run_script))
             self.assertEqual(command[-2:], ["--markdown", "第一行\n第二行"])
+
+    def test_send_markdown_uses_hidden_windows_subprocess(self) -> None:
+        notifier = self._build_notifier(
+            NotificationConfig(
+                feishu_enabled=True,
+                lark_cli_path="lark-cli",
+                feishu_user_id="ou_test",
+            )
+        )
+
+        with patch("linuxdoscanner.notify._hidden_subprocess_kwargs", return_value={"creationflags": 123}) as hidden_kwargs:
+            with patch("linuxdoscanner.notify.subprocess.run") as subprocess_run:
+                notifier.send_markdown("hello")
+
+        hidden_kwargs.assert_called_once_with()
+        self.assertEqual(subprocess_run.call_args.kwargs["creationflags"], 123)
+
+    def test_send_continues_after_single_topic_failure(self) -> None:
+        notifier = self._build_notifier(
+            NotificationConfig(
+                feishu_enabled=True,
+                lark_cli_path="lark-cli",
+                feishu_user_id="ou_test",
+            )
+        )
+        topics = [
+            {"topic_id": 1},
+            {"topic_id": 2},
+        ]
+
+        with patch.object(
+            notifier,
+            "_send_topic",
+            side_effect=[RuntimeError("boom"), None],
+        ):
+            sent_ids = notifier.send(topics)
+
+        self.assertEqual(sent_ids, [2])
+
+
+class WindowsToastNotifierTests(unittest.TestCase):
+    def test_hidden_subprocess_kwargs_builds_windows_flags(self) -> None:
+        class DummyStartupInfo:
+            def __init__(self) -> None:
+                self.dwFlags = 0
+                self.wShowWindow = 1
+
+        with patch("linuxdoscanner.notify.os.name", "nt"):
+            with patch.object(subprocess, "CREATE_NO_WINDOW", 0x08000000, create=True):
+                with patch.object(subprocess, "STARTUPINFO", DummyStartupInfo, create=True):
+                    with patch.object(subprocess, "STARTF_USESHOWWINDOW", 1, create=True):
+                        kwargs = _hidden_subprocess_kwargs()
+
+        self.assertEqual(kwargs["creationflags"], 0x08000000)
+        self.assertEqual(kwargs["startupinfo"].dwFlags, 1)
+        self.assertEqual(kwargs["startupinfo"].wShowWindow, 0)
+
+    def test_send_continues_after_single_topic_failure(self) -> None:
+        notifier = WindowsToastNotifier(SimpleNamespace(windows_notifications_enabled=True))
+        topics = [
+            {"topic_id": 1},
+            {"topic_id": 2},
+        ]
+
+        with patch("linuxdoscanner.notify.os.name", "nt"):
+            with patch.object(
+                notifier,
+                "_show_toast",
+                side_effect=[RuntimeError("boom"), None],
+            ):
+                sent_ids = notifier.send(topics)
+
+        self.assertEqual(sent_ids, [2])
 
 
 if __name__ == "__main__":

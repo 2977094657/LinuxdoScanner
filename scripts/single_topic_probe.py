@@ -26,7 +26,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--database",
         type=Path,
-        default=Path("data/linuxdo.sqlite3"),
+        default=None,
         help="SQLite database path.",
     )
     return parser.parse_args()
@@ -132,10 +132,12 @@ def build_metrics(runs: list[dict]) -> dict:
 
 def main() -> int:
     args = parse_args()
-    payload = load_payload(args.database.resolve(), args.topic_id)
-
     settings = Settings.from_env()
+    settings.ensure_directories()
     settings.llm_batch_size = 1
+    database_path = (args.database or settings.database_path).resolve()
+    payload = load_payload(database_path, args.topic_id)
+
     ai_config = AIProviderConfig(
         provider_type="openai_compatible",
         base_url=args.base_url,

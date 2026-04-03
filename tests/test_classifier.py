@@ -73,6 +73,55 @@ class TopicClassifierNotificationPolicyTests(unittest.TestCase):
 
         self.assertFalse(analysis.requires_notification)
 
+    def test_default_prompts_relax_benefit_posts_without_full_steps(self) -> None:
+        config = AIProviderConfig()
+
+        self.assertIn("不必把完整领取步骤当成唯一条件", config.focus_prompt)
+        self.assertIn("即使没有完整领取步骤，也应明显倾向通知", config.notification_prompt)
+        self.assertIn("标题明确写福利的帖子通常不是标题党", config.notification_prompt)
+
+    def test_legacy_default_prompts_are_migrated_to_new_defaults(self) -> None:
+        config = AIProviderConfig.from_dict(
+            {
+                "focus_prompt": (
+                    "优先识别高密度、可执行、对 AI 使用和判断有直接价值的主题。"
+                    "当前重点关注 AI 前沿新闻与模型更新、实验复现、辟谣实测、Codex 或 Claude Code 使用技巧，"
+                    "以及有明确路径或价值点的福利、公益站、资源信息。"
+                    "正文证据必须优先于标题；注册成功庆祝、闲聊、女装整活、树洞、感情和生活水贴不要误判。"
+                ),
+                "notification_prompt": (
+                    "只有当主题具备较强时效性、信息密度和行动价值时，才标记为需要通知。"
+                    "AI 相关新闻、严谨实验或辟谣实测、Codex/Claude Code 使用技巧，应明显倾向通知；"
+                    "正文直接给出福利路径、公益站入口、API 地址、密钥、额度、模型范围或具体使用方式的资源贴，也应明显倾向通知；"
+                    "注册庆祝、闲聊、女装整活、感情贴、树洞和纯吐槽不要通知。"
+                    "最终是否推送只看 requires_notification 这一个字段，拿不准时宁可标 false。"
+                ),
+            }
+        )
+
+        self.assertIn("不必把完整领取步骤当成唯一条件", config.focus_prompt)
+        self.assertIn("标题明确写福利的帖子通常不是标题党", config.notification_prompt)
+
+    def test_build_user_content_treats_clear_benefit_titles_as_actionable_signals(self) -> None:
+        classifier = self._build_classifier()
+        payload = self._build_payload(400)
+        payload.title = "公益站 400 亿 token 福利，codex 分组 0.25 折优惠"
+        payload.content_text = "福利信息帖，提及公益站 400 亿 token 福利、codex 分组 0.25 折优惠、cdk.linux.do 平台。"
+
+        user_content = classifier._build_user_content(
+            payload={
+                "focus_keywords": classifier.ai_config.focus_keywords,
+                "focus_prompt": classifier.ai_config.focus_prompt,
+                "notification_prompt": classifier.ai_config.notification_prompt,
+                "batch_size": 1,
+                "documents": [classifier._build_prompt_payload(payload)],
+            }
+        )
+
+        self.assertIn("不必强求完整领取步骤", user_content)
+        self.assertIn("标题、摘要或正文清楚指出可领取福利", user_content)
+        self.assertIn("cdk.linux.do 平台", user_content)
+
     def test_analyze_many_detailed_marks_unavailable_requests_as_non_retryable(self) -> None:
         classifier = self._build_classifier()
         events: list[dict[str, object]] = []
