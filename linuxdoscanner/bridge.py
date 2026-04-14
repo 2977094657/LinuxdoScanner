@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import logging
+import os
+import sys
 import threading
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -18,6 +20,14 @@ from .windows_startup import WindowsStartupManager
 
 
 LOGGER = logging.getLogger(__name__)
+
+
+def _current_process_restart_args() -> tuple[str, list[str]]:
+    executable = sys.executable
+    argv = sys.argv[:]
+    if getattr(sys, "frozen", False):
+        return executable, [executable, *argv[1:]]
+    return executable, [executable, *argv]
 
 
 class ExtensionBridgeServer:
@@ -263,6 +273,15 @@ class ExtensionBridgeServer:
                     )
                     return
 
+                if parsed.path == "/api/bridge/restart":
+                    bridge._write_json(
+                        self,
+                        HTTPStatus.OK,
+                        {"ok": True, "message": "后端将在 1 秒后重启。"},
+                    )
+                    bridge._schedule_restart()
+                    return
+
                 if parsed.path != "/api/bridge/push":
                     bridge._write_json(self, HTTPStatus.NOT_FOUND, {"ok": False, "error": "not_found"})
                     return
@@ -464,6 +483,29 @@ class ExtensionBridgeServer:
         except Exception:
             pass
         self.close()
+
+    def _schedule_restart(self) -> None:
+        """在后台线程中延迟 1 秒后重启当前进程。"""
+        def _do_restart() -> None:
+            import time
+            time.sleep(1)
+            LOGGER.info("正在重启后端进程 ...")
+            try:
+                self.stop()
+            except Exception:
+                LOGGER.exception("停止当前后端服务失败，将继续尝试重启进程。")
+            self._replace_current_process()
+
+        thread = threading.Thread(target=_do_restart, name="linuxdoscanner-restart", daemon=False)
+        thread.start()
+
+    def _replace_current_process(self) -> None:
+        executable, args = _current_process_restart_args()
+        try:
+            os.execv(executable, args)
+        except Exception:
+            LOGGER.exception("重启后端进程失败。")
+            raise
 
     def close(self) -> None:
         with self._close_lock:

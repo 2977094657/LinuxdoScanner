@@ -442,6 +442,10 @@ body {
   grid-template-columns: repeat(3, 1fr);
 }
 
+.form-grid.cols-4 {
+  grid-template-columns: repeat(4, 1fr);
+}
+
 .span-full {
   grid-column: 1 / -1;
 }
@@ -1427,7 +1431,8 @@ a.post-title:hover {
    ===================================================== */
 @media (max-width: 1024px) {
   .metrics-row,
-  .form-grid.cols-3 {
+  .form-grid.cols-3,
+  .form-grid.cols-4 {
     grid-template-columns: 1fr;
   }
 

@@ -9,6 +9,8 @@ const DEFAULT_CONFIG = {
   roundDelayMinSeconds: null,
   roundDelayMaxSeconds: null,
   pageRequestIntervalSeconds: null,
+  backwardFetchMaxDays: 1,
+  pushBatchSize: 5,
 };
 
 const DEFAULT_STATUS = {
@@ -634,11 +636,12 @@ async function executeSync(trigger = "manual") {
           lastSeenTopicId: serverState.last_seen_topic_id ?? null,
           bootstrapLimit: Number(serverState.bootstrap_limit) || 30,
           maxPagesPerRun: effectiveCrawlStrategy.maxPagesPerRound,
-          pushBatchSize: Math.max(1, Number(serverState.llm_batch_size) || 1),
+          pushBatchSize: Math.max(1, Number(config.pushBatchSize) || 5),
           pageRequestDelayMinSeconds: effectiveCrawlStrategy.pageRequestDelayMinSeconds,
           pageRequestDelayMaxSeconds: effectiveCrawlStrategy.pageRequestDelayMaxSeconds,
           roundDelayMinSeconds: effectiveCrawlStrategy.roundDelayMinSeconds,
           roundDelayMaxSeconds: effectiveCrawlStrategy.roundDelayMaxSeconds,
+          backwardFetchMaxDays: Math.max(0.01, Number(config.backwardFetchMaxDays) || 1),
         })
       );
 
@@ -812,6 +815,8 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
         roundDelayMinSeconds: Math.max(0, Number(message.roundDelayMinSeconds) || 0),
         roundDelayMaxSeconds: Math.max(0, Number(message.roundDelayMaxSeconds) || 0),
         pageRequestIntervalSeconds: null,
+        backwardFetchMaxDays: Math.max(0.01, Number(message.backwardFetchMaxDays) || 1),
+        pushBatchSize: Math.max(1, Number(message.pushBatchSize) || 5),
       });
       await updateAlarm();
       sendResponse({
@@ -916,6 +921,17 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 
     if (message?.type === "sync-now") {
       sendResponse(await runSync("manual"));
+      return;
+    }
+
+    if (message?.type === "restart-backend") {
+      const config = await getConfig();
+      const response = await bridgeFetch(config, "/api/bridge/restart", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({}),
+      });
+      sendResponse({ ok: true, message: response?.message || "后端将在 1 秒后重启。" });
       return;
     }
 

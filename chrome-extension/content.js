@@ -181,12 +181,15 @@ async function collectTopicDocuments(
   pacing,
   syncRunId,
   siteState,
-  pushBatchSize
+  pushBatchSize,
+  backwardFetchMaxDays
 ) {
   const pendingDocuments = [];
   const seen = new Set();
   const normalizedPushBatchSize = Math.max(1, Number(pushBatchSize) || 1);
   const normalizedBootstrapLimit = Math.max(1, Number(bootstrapLimit) || 30);
+  // 向后获取最大天数限制，默认 1 天
+  const normalizedBackwardMaxDays = Math.max(0.01, Number(backwardFetchMaxDays) || 1);
   const normalizedSiteState = {
     loggedIn: Boolean(siteState?.loggedIn),
     categories: Array.isArray(siteState?.categories) ? siteState.categories : [],
@@ -195,6 +198,8 @@ async function collectTopicDocuments(
   let totalStored = 0;
   let scannedPages = 0;
   let pushedBatchCount = 0;
+  // 记录本轮首个主题的创建时间，用于计算时间跨度
+  let firstTopicCreatedAt = null;
 
   async function flushPendingDocuments(finalBatch, reason) {
     const documents = pendingDocuments.splice(0, pendingDocuments.length);
@@ -330,6 +335,30 @@ async function collectTopicDocuments(
           };
         }
 
+        // 向后获取时间跨度检查：
+        // 以本轮第一个主题的 created_at 作为锚点，当后续主题的时间距离超过设定天数时提前终止
+        if (lastSeenTopicId != null && topic.created_at) {
+          const topicTime = new Date(topic.created_at).getTime();
+          if (Number.isFinite(topicTime)) {
+            if (firstTopicCreatedAt === null) {
+              firstTopicCreatedAt = topicTime;
+            } else {
+              const gapMs = firstTopicCreatedAt - topicTime;
+              const gapDays = gapMs / (1000 * 60 * 60 * 24);
+              if (gapDays > normalizedBackwardMaxDays) {
+                await flushPendingDocuments(true, `向后获取已超过 ${normalizedBackwardMaxDays} 天，提前终止`);
+                return {
+                  ok: true,
+                  storedCount: totalStored,
+                  selectedCount: totalSelected,
+                  pushedBatchCount,
+                  scannedPages,
+                };
+              }
+            }
+          }
+        }
+
         totalSelected += 1;
         const document = await fetchTopicDocument(topic, syncRunId, {
           topicIndex: totalSelected,
@@ -420,7 +449,8 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
         pacing,
         message.syncRunId || "",
         siteState,
-        Number(message.pushBatchSize) || 1
+        Number(message.pushBatchSize) || 1,
+        Number(message.backwardFetchMaxDays) || 1
       );
       sendResponse({
         ok: true,

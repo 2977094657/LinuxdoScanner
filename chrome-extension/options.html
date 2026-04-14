@@ -188,7 +188,7 @@
             <span class="form-card-badge badge-active">已激活</span>
           </div>
 
-          <div class="form-grid cols-3">
+          <div class="form-grid cols-4">
             <label class="form-field span-full">
               <span class="form-label">本地服务地址</span>
               <input id="serverUrl" type="text" placeholder="http://127.0.0.1:8765" class="form-input">
@@ -200,6 +200,10 @@
             <label class="form-field">
               <span class="form-label">每轮最多页数</span>
               <input id="maxPagesPerRound" type="number" min="1" step="1" class="form-input">
+            </label>
+            <label class="form-field">
+              <span class="form-label">每批提交主题数</span>
+              <input id="pushBatchSize" type="number" min="1" step="1" class="form-input">
             </label>
             <label class="form-field">
               <span class="form-label">分页延迟最小值（秒）</span>
@@ -217,14 +221,22 @@
               <span class="form-label">轮次延迟最大值（秒）</span>
               <input id="roundDelayMaxSeconds" type="number" min="0" step="1" class="form-input">
             </label>
+            <label class="form-field">
+              <span class="form-label">向后获取最大天数</span>
+              <input id="backwardFetchMaxDays" type="number" min="0.01" step="0.5" class="form-input">
+            </label>
           </div>
 
-          <p class="form-hint">分页会在设定区间内随机等待，单轮扫满“每轮最多页数”后，会按轮次延迟区间随机等待再继续下一轮；如果最大值小于最小值，系统会自动纠正。</p>
+          <p class="form-hint">分页会在设定区间内随机等待，单轮扫满“每轮最多页数”后，会按轮次延迟区间随机等待再继续下一轮；如果最大值小于最小值，系统会自动纠正。“向后获取最大天数”控制回溯获取时的时间跨度：当本轮第一条帖子与后续帖子的时间差超过该值时，只获取该天数内的帖子，默认 1 天。</p>
 
           <div class="form-actions">
             <button id="saveBridgeButton" type="button" class="btn btn-primary">
               <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></svg>
               保存桥接设置
+            </button>
+            <button id="restartBackendButton" type="button" class="btn btn-secondary">
+              <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
+              重启后端
             </button>
           </div>
         </div>
@@ -298,7 +310,7 @@
             <span class="form-card-badge badge-provider">OpenAI 兼容接口</span>
           </div>
 
-          <div class="form-grid cols-3">
+          <div class="form-grid cols-4">
             <label class="form-field">
               <span class="form-label">接口地址</span>
               <input id="baseUrl" type="text" placeholder="https://api.openai.com/v1 或 https://your-newapi.example" class="form-input">

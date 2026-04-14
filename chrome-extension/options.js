@@ -226,10 +226,12 @@ function fillBridgeConfig(config, serverState = null) {
   preservedBridgeToken = config.bridgeToken || "";
   document.getElementById("intervalMinutes").value = String(config.intervalMinutes || 5);
   document.getElementById("maxPagesPerRound").value = String(strategy.maxPagesPerRound);
+  document.getElementById("pushBatchSize").value = String(Math.max(1, Number(config.pushBatchSize) || 5));
   document.getElementById("pageRequestDelayMinSeconds").value = String(strategy.pageRequestDelayMinSeconds);
   document.getElementById("pageRequestDelayMaxSeconds").value = String(strategy.pageRequestDelayMaxSeconds);
   document.getElementById("roundDelayMinSeconds").value = String(strategy.roundDelayMinSeconds);
   document.getElementById("roundDelayMaxSeconds").value = String(strategy.roundDelayMaxSeconds);
+  document.getElementById("backwardFetchMaxDays").value = String(Number(config.backwardFetchMaxDays) || 1);
   setCardState("bridgeCard", "armed");
 }
 
@@ -833,10 +835,12 @@ function collectBridgePayload() {
     bridgeToken: preservedBridgeToken,
     intervalMinutes: Number(document.getElementById("intervalMinutes").value),
     maxPagesPerRound: Number(document.getElementById("maxPagesPerRound").value),
+    pushBatchSize: Number(document.getElementById("pushBatchSize").value),
     pageRequestDelayMinSeconds: Number(document.getElementById("pageRequestDelayMinSeconds").value),
     pageRequestDelayMaxSeconds: Number(document.getElementById("pageRequestDelayMaxSeconds").value),
     roundDelayMinSeconds: Number(document.getElementById("roundDelayMinSeconds").value),
     roundDelayMaxSeconds: Number(document.getElementById("roundDelayMaxSeconds").value),
+    backwardFetchMaxDays: Number(document.getElementById("backwardFetchMaxDays").value) || 1,
     syncEnabled: true,
   };
 }
@@ -986,6 +990,19 @@ document.getElementById("saveBridgeButton").addEventListener("click", async () =
   try {
     await saveBridgeConfig();
     await refresh();
+  } catch (error) {
+    handleActionError(error);
+  }
+});
+
+document.getElementById("restartBackendButton").addEventListener("click", async () => {
+  const confirmed = window.confirm("确定要重启后端服务吗？重启期间同步将暂时中断。");
+  if (!confirmed) {
+    return;
+  }
+  try {
+    const response = await withButtonBusy("restartBackendButton", "重启中...", () => sendMessage({ type: "restart-backend" }));
+    showFeedback(response.message || "后端将在 1 秒后重启。");
   } catch (error) {
     handleActionError(error);
   }
