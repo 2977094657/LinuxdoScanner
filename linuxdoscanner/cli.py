@@ -215,7 +215,7 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "bridge-server":
         server = ExtensionBridgeServer(settings)
-        if os.name == "nt" and not args.no_tray:
+        if os.name == "nt" and not getattr(args, "no_tray", False):
             return _run_server_with_tray(server, settings)
         return _run_server_forever(server)
 

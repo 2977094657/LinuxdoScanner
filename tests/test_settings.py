@@ -11,7 +11,7 @@ from unittest.mock import patch
 from loguru import logger
 
 from linuxdoscanner.logging_utils import configure_logging
-from linuxdoscanner.settings import Settings
+from linuxdoscanner.settings import Settings, detect_lark_cli_executable
 
 
 class SettingsConfigTests(unittest.TestCase):
@@ -191,3 +191,13 @@ bridge_port = 1234
             self.assertIn("background error", error_log_path.read_text(encoding="utf-8"))
             logger.remove()
             logging.getLogger().handlers.clear()
+
+    def test_detect_lark_cli_skips_inaccessible_candidates(self) -> None:
+        def fake_exists(path: Path) -> bool:
+            if str(path) == "blocked":
+                raise PermissionError("blocked")
+            return str(path) == "available"
+
+        with patch("linuxdoscanner.settings.Path.exists", fake_exists):
+            with patch.dict(os.environ, {"LARK_CLI_PATH": "available"}, clear=True):
+                self.assertEqual(detect_lark_cli_executable("blocked"), "available")

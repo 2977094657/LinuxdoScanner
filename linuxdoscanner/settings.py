@@ -21,6 +21,13 @@ DEFAULT_REPORTS_DIR = DEFAULT_OUTPUT_DIR / "reports"
 DEFAULT_EVAL_REPORT_PATH = DEFAULT_REPORTS_DIR / "model_eval_logged_batches_deepseek_minimax.json"
 
 
+def _path_exists(path: str | Path) -> bool:
+    try:
+        return Path(path).exists()
+    except OSError:
+        return False
+
+
 def env_bool(name: str, default: bool = False) -> bool:
     raw_value = os.getenv(name)
     if raw_value is None:
@@ -38,7 +45,7 @@ def detect_browser_executable(configured_path: str | None = None) -> str | None:
         r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
     ]
     for candidate in candidates:
-        if candidate and Path(candidate).exists():
+        if candidate and _path_exists(candidate):
             return candidate
     return None
 
@@ -51,7 +58,7 @@ def detect_lark_cli_executable(configured_path: str | None = None) -> str | None
         r"C:\Program Files\nodejs\lark-cli",
     ]
     for candidate in candidates:
-        if candidate and Path(candidate).exists():
+        if candidate and _path_exists(candidate):
             return candidate
     return None
 
