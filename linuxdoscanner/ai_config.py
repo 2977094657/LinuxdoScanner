@@ -122,7 +122,7 @@ class AIProviderConfig:
         provider_type = self.provider_type if self.provider_type in SUPPORTED_PROVIDER_TYPES else "openai_compatible"
         return AIProviderConfig(
             provider_type=provider_type,
-            base_url=str(self.base_url or "").strip(),
+            base_url=normalize_api_base_url(self.base_url) or "",
             api_key=str(self.api_key or "").strip(),
             selected_model=str(self.selected_model or "").strip(),
             available_models=_normalize_model_list(self.available_models),
@@ -223,7 +223,7 @@ class AIConfigManager:
         self.database.set_app_config_json("ai_config", failed.to_dict())
 
 
-def normalize_chat_base_url(base_url: str | None) -> str | None:
+def normalize_api_base_url(base_url: str | None) -> str | None:
     raw = str(base_url or "").strip()
     if not raw:
         return None
@@ -233,20 +233,27 @@ def normalize_chat_base_url(base_url: str | None) -> str | None:
         raise ValueError("AI Base URL 必须是完整的 http/https 地址。")
 
     path = _strip_endpoint_suffix(parsed.path.rstrip("/"))
-    if not path:
-        path = "/v1"
-    elif not path.endswith("/v1"):
-        path = f"{path}/v1"
-
     normalized = parsed._replace(path=path, params="", query="", fragment="")
-    return urlunparse(normalized)
+    return urlunparse(normalized).rstrip("/")
+
+
+def normalize_chat_base_url(base_url: str | None) -> str | None:
+    return normalize_api_base_url(base_url)
+
+
+def build_api_endpoint_url(base_url: str | None, endpoint: str) -> str:
+    api_base_url = normalize_api_base_url(base_url)
+    if api_base_url is None:
+        raise ValueError("AI Base URL 不能为空。")
+    return f"{api_base_url.rstrip('/')}/{endpoint.strip('/')}"
 
 
 def normalize_models_url(base_url: str | None) -> str:
-    chat_base_url = normalize_chat_base_url(base_url)
-    if chat_base_url is None:
-        raise ValueError("AI Base URL 不能为空。")
-    return f"{chat_base_url.rstrip('/')}/models"
+    return build_api_endpoint_url(base_url, "models")
+
+
+def normalize_chat_completions_url(base_url: str | None) -> str:
+    return build_api_endpoint_url(base_url, "chat/completions")
 
 
 def _strip_endpoint_suffix(path: str) -> str:

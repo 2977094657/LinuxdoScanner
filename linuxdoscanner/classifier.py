@@ -8,7 +8,7 @@ from typing import Any
 
 import httpx
 
-from .ai_config import AIProviderConfig, normalize_chat_base_url
+from .ai_config import AIProviderConfig, normalize_api_base_url, normalize_chat_completions_url
 from .models import TopicAnalysis, TopicAnalysisResult, TopicPayload, normalize_topic_tags
 from .settings import Settings
 
@@ -102,8 +102,9 @@ class TopicClassifier:
         self.settings = settings
         self.ai_config = ai_config or AIProviderConfig.from_settings(settings)
         self.model_name = self.ai_config.selected_model
-        self._llm_base_url = normalize_chat_base_url(self.ai_config.base_url or settings.openai_base_url)
-        self._llm_chat_url = f"{self._llm_base_url.rstrip('/')}/chat/completions" if self._llm_base_url else None
+        raw_base_url = self.ai_config.base_url or settings.openai_base_url
+        self._llm_base_url = normalize_api_base_url(raw_base_url)
+        self._llm_chat_url = normalize_chat_completions_url(raw_base_url) if self._llm_base_url else None
         self._llm_http: httpx.Client | None = None
 
         if self.ai_config.api_key and self.model_name and self._llm_chat_url:
