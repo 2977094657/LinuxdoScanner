@@ -16,3 +16,4 @@ wheels/
 data/
 output/
 .output/
+.history
