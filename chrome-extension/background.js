@@ -9,7 +9,8 @@ const DEFAULT_CONFIG = {
   roundDelayMinSeconds: null,
   roundDelayMaxSeconds: null,
   pageRequestIntervalSeconds: null,
-  backwardFetchMaxDays: 1,
+  backwardFetchMaxHours: 24,
+  backwardFetchMaxDays: null, // 兼容旧版本的“天数”配置。
   pushBatchSize: 5,
 };
 
@@ -37,6 +38,7 @@ const DEFAULT_CRAWL_STRATEGY = {
   roundDelayMaxSeconds: 180,
 };
 const SYNC_BADGE_COLOR = "#3367d6";
+const DEFAULT_BACKWARD_FETCH_MAX_HOURS = 24;
 
 let activeSyncPromise = null;
 let activeSyncRunId = "";
@@ -51,7 +53,33 @@ function storageSet(values) {
 
 async function getConfig() {
   const stored = await storageGet(DEFAULT_CONFIG);
-  return { ...DEFAULT_CONFIG, ...stored };
+  const rawBackwardConfig = await storageGet(["backwardFetchMaxHours", "backwardFetchMaxDays"]);
+  const hasHourConfig =
+    rawBackwardConfig.backwardFetchMaxHours !== undefined &&
+    rawBackwardConfig.backwardFetchMaxHours !== null &&
+    rawBackwardConfig.backwardFetchMaxHours !== "";
+  const merged = { ...DEFAULT_CONFIG, ...stored };
+  return {
+    ...merged,
+    backwardFetchMaxHours: normalizeBackwardFetchMaxHours(
+      hasHourConfig ? merged.backwardFetchMaxHours : null,
+      merged.backwardFetchMaxDays
+    ),
+  };
+}
+
+function normalizeBackwardFetchMaxHours(value, legacyDays = null) {
+  const hours = Number(value);
+  if (Number.isFinite(hours) && hours > 0) {
+    return Math.max(1, Math.round(hours));
+  }
+
+  const days = Number(legacyDays);
+  if (Number.isFinite(days) && days > 0) {
+    return Math.max(1, Math.round(days * 24));
+  }
+
+  return DEFAULT_BACKWARD_FETCH_MAX_HOURS;
 }
 
 function toOptionalNonNegativeInteger(value) {
@@ -641,7 +669,10 @@ async function executeSync(trigger = "manual") {
           pageRequestDelayMaxSeconds: effectiveCrawlStrategy.pageRequestDelayMaxSeconds,
           roundDelayMinSeconds: effectiveCrawlStrategy.roundDelayMinSeconds,
           roundDelayMaxSeconds: effectiveCrawlStrategy.roundDelayMaxSeconds,
-          backwardFetchMaxDays: Math.max(0.01, Number(config.backwardFetchMaxDays) || 1),
+          backwardFetchMaxHours: normalizeBackwardFetchMaxHours(
+            config.backwardFetchMaxHours,
+            config.backwardFetchMaxDays
+          ),
         })
       );
 
@@ -815,7 +846,11 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
         roundDelayMinSeconds: Math.max(0, Number(message.roundDelayMinSeconds) || 0),
         roundDelayMaxSeconds: Math.max(0, Number(message.roundDelayMaxSeconds) || 0),
         pageRequestIntervalSeconds: null,
-        backwardFetchMaxDays: Math.max(0.01, Number(message.backwardFetchMaxDays) || 1),
+        backwardFetchMaxHours: normalizeBackwardFetchMaxHours(
+          message.backwardFetchMaxHours,
+          message.backwardFetchMaxDays
+        ),
+        backwardFetchMaxDays: null,
         pushBatchSize: Math.max(1, Number(message.pushBatchSize) || 5),
       });
       await updateAlarm();

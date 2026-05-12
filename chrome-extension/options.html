@@ -222,12 +222,12 @@
               <input id="roundDelayMaxSeconds" type="number" min="0" step="1" class="form-input">
             </label>
             <label class="form-field">
-              <span class="form-label">向后获取最大天数</span>
-              <input id="backwardFetchMaxDays" type="number" min="0.01" step="0.5" class="form-input">
+              <span class="form-label">向后获取最大小时数</span>
+              <input id="backwardFetchMaxHours" type="number" min="1" step="1" class="form-input">
             </label>
           </div>
 
-          <p class="form-hint">分页会在设定区间内随机等待，单轮扫满“每轮最多页数”后，会按轮次延迟区间随机等待再继续下一轮；如果最大值小于最小值，系统会自动纠正。“向后获取最大天数”控制回溯获取时的时间跨度：当本轮第一条帖子与后续帖子的时间差超过该值时，只获取该天数内的帖子，默认 1 天。</p>
+          <p class="form-hint">分页会在设定区间内随机等待，单轮扫满“每轮最多页数”后，会按轮次延迟区间随机等待再继续下一轮；如果最大值小于最小值，系统会自动纠正。“向后获取最大小时数”控制回溯获取时的时间跨度：当本轮第一条帖子与后续帖子的时间差超过该值时，只获取该小时数内的帖子，默认 24 小时。</p>
 
           <div class="form-actions">
             <button id="saveBridgeButton" type="button" class="btn btn-primary">

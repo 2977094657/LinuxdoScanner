@@ -182,14 +182,14 @@ async function collectTopicDocuments(
   syncRunId,
   siteState,
   pushBatchSize,
-  backwardFetchMaxDays
+  backwardFetchMaxHours
 ) {
   const pendingDocuments = [];
   const seen = new Set();
   const normalizedPushBatchSize = Math.max(1, Number(pushBatchSize) || 1);
   const normalizedBootstrapLimit = Math.max(1, Number(bootstrapLimit) || 30);
-  // 向后获取最大天数限制，默认 1 天
-  const normalizedBackwardMaxDays = Math.max(0.01, Number(backwardFetchMaxDays) || 1);
+  // 向后获取最大小时数限制，默认 24 小时。
+  const normalizedBackwardMaxHours = Math.max(1, Math.round(Number(backwardFetchMaxHours) || 24));
   const normalizedSiteState = {
     loggedIn: Boolean(siteState?.loggedIn),
     categories: Array.isArray(siteState?.categories) ? siteState.categories : [],
@@ -336,7 +336,7 @@ async function collectTopicDocuments(
         }
 
         // 向后获取时间跨度检查：
-        // 以本轮第一个主题的 created_at 作为锚点，当后续主题的时间距离超过设定天数时提前终止
+        // 以本轮第一个主题的 created_at 作为锚点，当后续主题的时间距离超过设定小时数时提前终止。
         if (lastSeenTopicId != null && topic.created_at) {
           const topicTime = new Date(topic.created_at).getTime();
           if (Number.isFinite(topicTime)) {
@@ -344,9 +344,9 @@ async function collectTopicDocuments(
               firstTopicCreatedAt = topicTime;
             } else {
               const gapMs = firstTopicCreatedAt - topicTime;
-              const gapDays = gapMs / (1000 * 60 * 60 * 24);
-              if (gapDays > normalizedBackwardMaxDays) {
-                await flushPendingDocuments(true, `向后获取已超过 ${normalizedBackwardMaxDays} 天，提前终止`);
+              const gapHours = gapMs / (1000 * 60 * 60);
+              if (gapHours > normalizedBackwardMaxHours) {
+                await flushPendingDocuments(true, `向后获取已超过 ${normalizedBackwardMaxHours} 小时，提前终止`);
                 return {
                   ok: true,
                   storedCount: totalStored,
@@ -450,7 +450,8 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
         message.syncRunId || "",
         siteState,
         Number(message.pushBatchSize) || 1,
-        Number(message.backwardFetchMaxDays) || 1
+        Number(message.backwardFetchMaxHours) ||
+          Math.max(1, Math.round((Number(message.backwardFetchMaxDays) || 1) * 24))
       );
       sendResponse({
         ok: true,

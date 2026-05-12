@@ -136,10 +136,25 @@ function resolveBridgeStrategy(config, serverState = null) {
   };
 }
 
+function normalizeBackwardFetchMaxHours(value, legacyDays = null) {
+  const hours = Number(value);
+  if (Number.isFinite(hours) && hours > 0) {
+    return Math.max(1, Math.round(hours));
+  }
+
+  const days = Number(legacyDays);
+  if (Number.isFinite(days) && days > 0) {
+    return Math.max(1, Math.round(days * 24));
+  }
+
+  return DEFAULT_BACKWARD_FETCH_MAX_HOURS;
+}
+
 let feedbackTimer = null;
 let preservedBridgeToken = "";
 let crawlKeywordTimer = null;
 let latestAutostartStatus = null;
+const DEFAULT_BACKWARD_FETCH_MAX_HOURS = 24;
 
 const crawlDataState = {
   page: 1,
@@ -231,7 +246,9 @@ function fillBridgeConfig(config, serverState = null) {
   document.getElementById("pageRequestDelayMaxSeconds").value = String(strategy.pageRequestDelayMaxSeconds);
   document.getElementById("roundDelayMinSeconds").value = String(strategy.roundDelayMinSeconds);
   document.getElementById("roundDelayMaxSeconds").value = String(strategy.roundDelayMaxSeconds);
-  document.getElementById("backwardFetchMaxDays").value = String(Number(config.backwardFetchMaxDays) || 1);
+  document.getElementById("backwardFetchMaxHours").value = String(
+    normalizeBackwardFetchMaxHours(config.backwardFetchMaxHours, config.backwardFetchMaxDays)
+  );
   setCardState("bridgeCard", "armed");
 }
 
@@ -840,7 +857,9 @@ function collectBridgePayload() {
     pageRequestDelayMaxSeconds: Number(document.getElementById("pageRequestDelayMaxSeconds").value),
     roundDelayMinSeconds: Number(document.getElementById("roundDelayMinSeconds").value),
     roundDelayMaxSeconds: Number(document.getElementById("roundDelayMaxSeconds").value),
-    backwardFetchMaxDays: Number(document.getElementById("backwardFetchMaxDays").value) || 1,
+    backwardFetchMaxHours: normalizeBackwardFetchMaxHours(
+      document.getElementById("backwardFetchMaxHours").value
+    ),
     syncEnabled: true,
   };
 }
