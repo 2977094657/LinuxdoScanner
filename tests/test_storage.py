@@ -347,6 +347,45 @@ class DatabaseTopicListTests(unittest.TestCase):
                 ["AI相关", "Codex技巧", "实验复现", "羊毛福利"],
             )
 
+    def test_upsert_preserves_existing_body_when_later_fetch_is_restricted_notice(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            database_path = Path(temp_dir) / "linuxdo.sqlite3"
+            database = Database(database_path)
+            database.initialize()
+
+            original = self._build_payload(
+                9,
+                title="Original topic",
+                tags=["AI相关"],
+                category_name="开发调优",
+                first_post_html="<p>原始正文应该作为本地快照保留。</p>",
+            )
+            restricted = self._build_payload(
+                9,
+                title="Original topic",
+                tags=["AI相关"],
+                category_name="开发调优",
+                first_post_html="<p>抱歉，此主题已被屏蔽。</p>",
+            )
+            restored = self._build_payload(
+                9,
+                title="Original topic",
+                tags=["AI相关"],
+                category_name="开发调优",
+                first_post_html="<p>恢复后的正文可以正常覆盖。</p>",
+            )
+
+            database.upsert_topic(original, self._analysis("AI相关"))
+            database.upsert_topic(restricted, self._analysis("AI相关"))
+
+            row = database.list_topics(page=1, page_size=10)["items"][0]
+            self.assertEqual(row["first_post_html"], original.first_post_html)
+
+            database.upsert_topic(restored, self._analysis("AI相关"))
+
+            row = database.list_topics(page=1, page_size=10)["items"][0]
+            self.assertEqual(row["first_post_html"], restored.first_post_html)
+
 
 if __name__ == "__main__":
     unittest.main()

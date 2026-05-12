@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 import sqlite3
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -61,6 +62,25 @@ AI_RETRY_QUEUE_COLUMN_DEFINITIONS: dict[str, str] = {
     "last_failed_at": "TEXT NOT NULL",
     "resolved_at": "TEXT",
 }
+
+RESTRICTED_FIRST_POST_MARKERS = (
+    "已被屏蔽",
+    "被屏蔽",
+    "无权查看",
+    "没有权限",
+    "权限不足",
+    "你没有权限",
+    "无法访问此主题",
+    "该主题不存在",
+    "主题不存在",
+    "帖子已被删除",
+    "内容已被删除",
+    "this topic is no longer available",
+    "you are not permitted",
+    "you do not have permission",
+    "oops! that page",
+)
+RESTRICTED_FIRST_POST_MAX_CHARS = 500
 
 
 def utc_now() -> str:
@@ -175,9 +195,59 @@ class Database:
             "deleted_ai_retry_rows": int(ai_retry_count),
         }
 
+    def _resolve_first_post_html_for_upsert(
+        self,
+        conn: sqlite3.Connection,
+        topic_id: int,
+        new_html: str | None,
+    ) -> str | None:
+        """保留已经入库的原始正文，避免后续受限提示覆盖本地快照。"""
+
+        if not self._looks_like_restricted_first_post(new_html):
+            return new_html
+
+        row = conn.execute(
+            """
+            SELECT first_post_html
+            FROM topics
+            WHERE topic_id = ?
+            """,
+            (topic_id,),
+        ).fetchone()
+        existing_html = row["first_post_html"] if row is not None else None
+        return existing_html or new_html
+
+    @staticmethod
+    def _looks_like_restricted_first_post(html: str | None) -> bool:
+        text = Database._compact_html_text(html)
+        if not text:
+            return True
+        if len(text) > RESTRICTED_FIRST_POST_MAX_CHARS:
+            return False
+        lowered = text.lower()
+        return any(marker in lowered for marker in RESTRICTED_FIRST_POST_MARKERS)
+
+    @staticmethod
+    def _compact_html_text(html: str | None) -> str:
+        if not html:
+            return ""
+        text = re.sub(r"<[^>]+>", " ", str(html))
+        text = (
+            text.replace("&nbsp;", " ")
+            .replace("&amp;", "&")
+            .replace("&#39;", "'")
+            .replace("&quot;", '"')
+        )
+        return re.sub(r"\s+", " ", text).strip()
+
     def upsert_topic(self, payload: TopicPayload, analysis: TopicAnalysis) -> None:
         now = utc_now()
         with self.connect() as conn:
+            first_post_html = self._resolve_first_post_html_for_upsert(
+                conn,
+                payload.topic_id,
+                payload.first_post_html,
+            )
             conn.execute(
                 """
                 INSERT INTO topics (
@@ -242,7 +312,7 @@ class Database:
                     payload.author_username,
                     payload.author_display_name,
                     payload.author_avatar_url,
-                    payload.first_post_html,
+                    first_post_html,
                     payload.topic_image_url,
                     json.dumps(payload.image_urls, ensure_ascii=False),
                     json.dumps(payload.external_links, ensure_ascii=False),
