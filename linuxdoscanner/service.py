@@ -151,6 +151,7 @@ class LinuxDoMonitor:
         *,
         update_last_seen: bool = True,
         emit_completion_event: bool = True,
+        ai_batch_size: int | None = None,
     ) -> list[TopicPayload]:
         self.refresh_classifier()
         self.refresh_notifier()
@@ -163,7 +164,7 @@ class LinuxDoMonitor:
             label="整理服务端任务",
             detail=f"收到 {len(topic_documents)} 个主题，正在筛选新增内容",
         )
-        llm_batch_size = self._llm_batch_size()
+        llm_batch_size = self._llm_batch_size(ai_batch_size)
         max_topic_id = last_seen_topic_id or 0
         pending_retry_topic_ids = set(self.database.list_pending_ai_retry_topic_ids())
         retried_previous_failures = False
@@ -209,12 +210,14 @@ class LinuxDoMonitor:
                 retry_pending_failures=False,
                 update_last_seen=False,
                 refresh_components=False,
+                ai_batch_size=llm_batch_size,
             )
             max_topic_id = max(max_topic_id, outcome.max_topic_id)
             if not retried_previous_failures and outcome.saw_successful_ai_request and pending_retry_topic_ids:
                 self._retry_previously_failed_payloads(
                     pending_retry_topic_ids,
                     progress_callback=progress_callback,
+                    retry_batch_size=llm_batch_size,
                 )
                 retried_previous_failures = True
             pending_payloads = []
@@ -249,12 +252,14 @@ class LinuxDoMonitor:
                 retry_pending_failures=False,
                 update_last_seen=False,
                 refresh_components=False,
+                ai_batch_size=llm_batch_size,
             )
             max_topic_id = max(max_topic_id, outcome.max_topic_id)
             if not retried_previous_failures and outcome.saw_successful_ai_request and pending_retry_topic_ids:
                 self._retry_previously_failed_payloads(
                     pending_retry_topic_ids,
                     progress_callback=progress_callback,
+                    retry_batch_size=llm_batch_size,
                 )
 
         if update_last_seen and max_topic_id:
@@ -359,8 +364,9 @@ class LinuxDoMonitor:
         time.sleep(delay_seconds)
         return delay_seconds
 
-    def _llm_batch_size(self) -> int:
-        return max(1, int(getattr(self.settings, "llm_batch_size", 1) or 1))
+    def _llm_batch_size(self, batch_size: int | None = None) -> int:
+        source = batch_size if batch_size is not None else getattr(self.settings, "llm_batch_size", 1)
+        return max(1, int(source or 1))
 
     def _store_payloads(
         self,
@@ -403,6 +409,7 @@ class LinuxDoMonitor:
         retry_pending_failures: bool = True,
         update_last_seen: bool = True,
         refresh_components: bool = True,
+        ai_batch_size: int | None = None,
     ) -> PayloadStoreOutcome:
         if refresh_components:
             self.refresh_classifier()
@@ -413,7 +420,7 @@ class LinuxDoMonitor:
         else:
             pending_retry_topic_ids = set(pending_retry_topic_ids)
         total_payloads = len(payloads)
-        llm_batch_size = self._llm_batch_size()
+        llm_batch_size = self._llm_batch_size(ai_batch_size)
         expected_batch_count = max(1, (total_payloads + llm_batch_size - 1) // llm_batch_size)
         self._emit_progress(
             progress_callback,
@@ -475,7 +482,11 @@ class LinuxDoMonitor:
                     detail=f"AI 已完成 {completed_topics}/{total_payloads} 个主题（第 {batch_index}/{batch_count} 批已返回）",
                 )
 
-        results = self.classifier.analyze_many_detailed(payloads, progress_callback=on_classifier_progress)
+        results = self.classifier.analyze_many_detailed(
+            payloads,
+            progress_callback=on_classifier_progress,
+            batch_size=llm_batch_size,
+        )
         self._emit_progress(
             progress_callback,
             percent=95,
@@ -525,6 +536,7 @@ class LinuxDoMonitor:
             self._retry_previously_failed_payloads(
                 pending_retry_topic_ids,
                 progress_callback=progress_callback,
+                retry_batch_size=llm_batch_size,
             )
 
         pending = self.database.get_pending_notifications()
@@ -573,6 +585,8 @@ class LinuxDoMonitor:
         self,
         topic_ids: set[int],
         progress_callback: ProgressCallback | None = None,
+        *,
+        retry_batch_size: int | None = None,
     ) -> None:
         retries = self.database.get_pending_ai_retries(topic_ids)
         if not retries:
@@ -580,9 +594,11 @@ class LinuxDoMonitor:
 
         payloads = [retry.payload for retry in retries]
         retry_lookup = {retry.topic_id: retry for retry in retries}
+        effective_retry_batch_size = self._llm_batch_size(retry_batch_size)
         LOGGER.info(
-            "Retrying %s previously failed AI requests after a successful AI call.",
+            "Retrying %s previously failed AI requests after a successful AI call with batch size %s.",
             len(payloads),
+            effective_retry_batch_size,
         )
         retry_total = len(payloads)
 
@@ -624,7 +640,11 @@ class LinuxDoMonitor:
                     detail=f"历史失败主题已补偿 {completed_topics}/{retry_total}",
                 )
 
-        results = self.classifier.analyze_many_detailed(payloads, progress_callback=on_retry_progress)
+        results = self.classifier.analyze_many_detailed(
+            payloads,
+            progress_callback=on_retry_progress,
+            batch_size=effective_retry_batch_size,
+        )
         for payload, result in zip(payloads, results, strict=False):
             self.database.upsert_topic(payload, result.analysis)
             if result.request_succeeded:

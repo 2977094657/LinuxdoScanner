@@ -126,13 +126,24 @@ class TopicClassifier:
         self,
         payloads: list[TopicPayload],
         progress_callback: ClassifierProgressCallback | None = None,
+        *,
+        batch_size: int | None = None,
     ) -> list[TopicAnalysis]:
-        return [result.analysis for result in self.analyze_many_detailed(payloads, progress_callback=progress_callback)]
+        return [
+            result.analysis
+            for result in self.analyze_many_detailed(
+                payloads,
+                progress_callback=progress_callback,
+                batch_size=batch_size,
+            )
+        ]
 
     def analyze_many_detailed(
         self,
         payloads: list[TopicPayload],
         progress_callback: ClassifierProgressCallback | None = None,
+        *,
+        batch_size: int | None = None,
     ) -> list[TopicAnalysisResult]:
         if not payloads:
             return []
@@ -156,7 +167,8 @@ class TopicClassifier:
             ]
 
         results: list[TopicAnalysisResult] = []
-        batches = self._batched(payloads, self.settings.llm_batch_size)
+        effective_batch_size = max(1, int(batch_size or self.settings.llm_batch_size or 1))
+        batches = self._batched(payloads, effective_batch_size)
         total_topics = len(payloads)
         completed_topics = 0
         for batch_index, batch in enumerate(batches, start=1):

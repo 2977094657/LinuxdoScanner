@@ -245,6 +245,23 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+async function waitForBridgeHealth(config, { timeoutMs = 15000, intervalMs = 700 } = {}) {
+  const deadline = Date.now() + timeoutMs;
+  let lastError = null;
+  while (Date.now() < deadline) {
+    try {
+      const response = await bridgeFetch(config, "/api/bridge/health");
+      if (response?.ok) {
+        return response;
+      }
+    } catch (error) {
+      lastError = error;
+    }
+    await sleep(intervalMs);
+  }
+  throw new Error(lastError?.message || "后端重启后未在预期时间内恢复");
+}
+
 async function bridgePushWithProgress(config, payload, syncRunId) {
   let polling = true;
   const pollProgress = (async () => {
@@ -811,6 +828,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
           logged_in: Boolean(message.loggedIn),
           categories: Array.isArray(message.categories) ? message.categories : [],
           topics: Array.isArray(message.topics) ? message.topics : [],
+          push_batch_size: Math.max(1, Number(message.pushBatchSize) || Number(config.pushBatchSize) || 5),
           streaming: true,
           final_batch: Boolean(message.finalBatch),
           batch_index: Math.max(1, Number(message.batchIndex) || 1),
@@ -961,12 +979,14 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 
     if (message?.type === "restart-backend") {
       const config = await getConfig();
-      const response = await bridgeFetch(config, "/api/bridge/restart", {
+      await bridgeFetch(config, "/api/bridge/restart", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({}),
       });
-      sendResponse({ ok: true, message: response?.message || "后端将在 1 秒后重启。" });
+      await sleep(1200);
+      await waitForBridgeHealth(config);
+      sendResponse({ ok: true, message: "后端已重启并恢复连接。" });
       return;
     }
 

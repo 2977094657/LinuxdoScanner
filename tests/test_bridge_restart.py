@@ -26,6 +26,15 @@ class BridgeRestartTests(unittest.TestCase):
         self.assertEqual(executable, "LinuxDoScannerBackend.exe")
         self.assertEqual(args, ["LinuxDoScannerBackend.exe", "startup-run"])
 
+    def test_restart_args_support_console_script_launcher(self) -> None:
+        with patch.object(sys, "executable", "python.exe"):
+            with patch.object(sys, "argv", [r".venv\Scripts\linuxdoscanner.exe", "bridge-server"]):
+                with patch.object(sys, "frozen", False, create=True):
+                    executable, args = _current_process_restart_args()
+
+        self.assertEqual(executable, r".venv\Scripts\linuxdoscanner.exe")
+        self.assertEqual(args, [r".venv\Scripts\linuxdoscanner.exe", "bridge-server"])
+
     def test_schedule_restart_uses_non_daemon_thread(self) -> None:
         created: dict[str, object] = {}
 

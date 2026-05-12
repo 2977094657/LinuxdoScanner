@@ -5,7 +5,7 @@ from types import SimpleNamespace
 
 from linuxdoscanner.ai_config import AIProviderConfig
 from linuxdoscanner.classifier import TopicClassifier
-from linuxdoscanner.models import TopicPayload
+from linuxdoscanner.models import TopicAnalysis, TopicAnalysisResult, TopicPayload
 
 
 class TopicClassifierNotificationPolicyTests(unittest.TestCase):
@@ -180,6 +180,45 @@ class TopicClassifierNotificationPolicyTests(unittest.TestCase):
         )
         self.assertEqual(events[0]["completed_topics"], 0)
         self.assertEqual(events[1]["completed_topics"], 2)
+
+    def test_analyze_many_detailed_respects_explicit_batch_size(self) -> None:
+        classifier = self._build_classifier()
+        classifier.model_name = "test-model"
+        classifier._llm_chat_url = "https://example.com/v1/chat/completions"
+        classifier._llm_http = object()
+        batch_calls: list[list[int]] = []
+
+        def fake_batch(payloads: list[TopicPayload]) -> list[TopicAnalysisResult]:
+            batch_calls.append([payload.topic_id for payload in payloads])
+            return [
+                TopicAnalysisResult(
+                    analysis=TopicAnalysis(
+                        primary_label="Codex技巧",
+                        labels=["AI相关", "Codex技巧"],
+                        summary="给出了明确做法。",
+                        reasons=["包含可执行步骤。"],
+                        provider="llm:test-model",
+                        requires_notification=True,
+                    ),
+                    request_succeeded=True,
+                )
+                for _ in payloads
+            ]
+
+        classifier._llm_analyze_batch_detailed = fake_batch
+        events: list[dict[str, object]] = []
+
+        classifier.analyze_many_detailed(
+            [self._build_payload(1), self._build_payload(2), self._build_payload(3)],
+            progress_callback=events.append,
+            batch_size=1,
+        )
+
+        self.assertEqual(batch_calls, [[1], [2], [3]])
+        self.assertEqual(
+            [(event["batch_index"], event["batch_count"]) for event in events if event["event"] == "batch_start"],
+            [(1, 3), (2, 3), (3, 3)],
+        )
 
 
 if __name__ == "__main__":

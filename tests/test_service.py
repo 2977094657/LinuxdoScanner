@@ -103,14 +103,18 @@ class FakeClassifier:
     def __init__(self, plans: list[list[TopicAnalysisResult]]):
         self.plans = list(plans)
         self.calls: list[list[int]] = []
+        self.batch_sizes: list[int | None] = []
         self.progress_events: list[list[dict[str, object]]] = []
 
     def analyze_many_detailed(
         self,
         payloads: list[TopicPayload],
         progress_callback=None,
+        *,
+        batch_size: int | None = None,
     ) -> list[TopicAnalysisResult]:
         self.calls.append([payload.topic_id for payload in payloads])
+        self.batch_sizes.append(batch_size)
         if progress_callback is not None:
             events = [
                 {
@@ -224,6 +228,52 @@ class LinuxDoMonitorAIRetryTests(unittest.TestCase):
                     (300, "llm_failed", "AI识别失败"),
                 ],
             )
+
+    def test_retry_uses_explicit_user_batch_size(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            database_path = Path(temp_dir) / "linuxdo.sqlite3"
+            database = Database(database_path)
+            database.initialize()
+
+            previous_failed_payloads = [
+                build_payload(101, title="历史失败请求 1"),
+                build_payload(102, title="历史失败请求 2"),
+                build_payload(103, title="历史失败请求 3"),
+            ]
+            for payload in previous_failed_payloads:
+                database.upsert_topic(
+                    payload,
+                    TopicAnalysis(
+                        primary_label="AI识别失败",
+                        labels=["AI识别失败"],
+                        summary="等待补偿重试。",
+                        reasons=["上次请求失败。"],
+                        provider="llm_failed",
+                        requires_notification=False,
+                    ),
+                )
+                database.enqueue_ai_retry(payload, failure_reason="HTTP 500", max_retries=3)
+
+            monitor = object.__new__(LinuxDoMonitor)
+            monitor.settings = SimpleNamespace(llm_retry_limit=3, llm_batch_size=10)
+            monitor.database = database
+            monitor.classifier = FakeClassifier(
+                [
+                    [success_result("模型更新")],
+                    [success_result("Codex技巧") for _ in previous_failed_payloads],
+                ]
+            )
+            monitor.notifier = FakeNotifier()
+            monitor.refresh_classifier = lambda: None
+            monitor.refresh_notifier = lambda: None
+
+            monitor._store_payload_batch(
+                [build_payload(200, title="本轮成功请求")],
+                previous_last_seen_topic_id=None,
+                ai_batch_size=1,
+            )
+
+            self.assertEqual(monitor.classifier.batch_sizes, [1, 1])
 
     def test_store_payloads_emits_user_facing_progress_stages(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

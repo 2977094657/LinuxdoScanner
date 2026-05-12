@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import subprocess
 import sys
 import threading
 from http import HTTPStatus
@@ -27,6 +28,12 @@ def _current_process_restart_args() -> tuple[str, list[str]]:
     argv = sys.argv[:]
     if getattr(sys, "frozen", False):
         return executable, [executable, *argv[1:]]
+
+    if argv:
+        launcher_suffix = os.path.splitext(argv[0])[1].lower()
+        if launcher_suffix in {".exe", ".com", ".cmd", ".bat"}:
+            return argv[0], argv
+
     return executable, [executable, *argv]
 
 
@@ -342,6 +349,13 @@ class ExtensionBridgeServer:
                         {"ok": False, "error": "invalid_topics", "detail": "`topics` 必须是数组。"},
                     )
                     return
+                try:
+                    push_batch_size = max(
+                        1,
+                        int(payload.get("push_batch_size") or payload.get("batch_size") or bridge.settings.llm_batch_size),
+                    )
+                except Exception:
+                    push_batch_size = bridge.settings.llm_batch_size
 
                 bridge._set_progress_state(
                     sync_run_id=sync_run_id,
@@ -393,6 +407,7 @@ class ExtensionBridgeServer:
                             progress_callback=on_monitor_progress,
                             update_last_seen=not streaming,
                             emit_completion_event=not streaming,
+                            ai_batch_size=push_batch_size,
                         )
                         if stored:
                             session["max_topic_id"] = max(
@@ -501,11 +516,43 @@ class ExtensionBridgeServer:
 
     def _replace_current_process(self) -> None:
         executable, args = _current_process_restart_args()
+        if os.name == "nt":
+            try:
+                self._spawn_replacement_process(args)
+            except Exception:
+                LOGGER.exception("启动新的后端进程失败，将尝试原地替换当前进程。")
+            else:
+                os._exit(0)
+
         try:
             os.execv(executable, args)
         except Exception:
             LOGGER.exception("重启后端进程失败。")
             raise
+
+    def _spawn_replacement_process(self, args: list[str]) -> None:
+        creationflags = 0
+        startupinfo = None
+        if os.name == "nt":
+            creationflags = getattr(subprocess, "DETACHED_PROCESS", 0) | getattr(
+                subprocess,
+                "CREATE_NEW_PROCESS_GROUP",
+                0,
+            )
+            startupinfo = subprocess.STARTUPINFO()
+            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+            startupinfo.wShowWindow = subprocess.SW_HIDE
+
+        subprocess.Popen(
+            args,
+            cwd=os.getcwd(),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            close_fds=True,
+            creationflags=creationflags,
+            startupinfo=startupinfo,
+        )
 
     def close(self) -> None:
         with self._close_lock:

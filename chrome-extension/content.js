@@ -168,6 +168,7 @@ async function pushTopicBatchToBridge(syncRunId, payload) {
     categories: Array.isArray(payload.categories) ? payload.categories : [],
     topics: Array.isArray(payload.topics) ? payload.topics : [],
     batchIndex: Math.max(1, Number(payload.batchIndex) || 1),
+    pushBatchSize: Math.max(1, Number(payload.pushBatchSize) || 1),
     finalBatch: Boolean(payload.finalBatch),
     trigger: payload.trigger || "manual",
   });
@@ -240,6 +241,7 @@ async function collectTopicDocuments(
       categories: normalizedSiteState.categories,
       topics: documents,
       batchIndex,
+      pushBatchSize: normalizedPushBatchSize,
       finalBatch,
     });
     pushedBatchCount += hasDocuments ? 1 : 0;
