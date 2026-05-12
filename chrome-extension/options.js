@@ -152,7 +152,6 @@ function normalizeBackwardFetchMaxHours(value, legacyDays = null) {
 
 let feedbackTimer = null;
 let preservedBridgeToken = "";
-let crawlKeywordTimer = null;
 let latestAutostartStatus = null;
 const DEFAULT_BACKWARD_FETCH_MAX_HOURS = 24;
 
@@ -779,6 +778,31 @@ function renderCrawlData(items) {
   updateCrawlPaginationControls();
 }
 
+function showCrawlManualReadyState() {
+  const list = document.getElementById("crawlDataList");
+  const emptyState = document.getElementById("crawlEmptyState");
+  if (list) {
+    list.innerHTML = "";
+  }
+  if (emptyState) {
+    emptyState.hidden = false;
+  }
+  crawlDataState.total = 0;
+  crawlDataState.totalPages = 1;
+  setText("crawlEmptyTitle", "等待搜索");
+  setText("crawlEmptyHint", "设置筛选条件后点击“搜索”读取本地已入库的爬取数据。");
+  setText("crawlTotalPages", "1");
+  setCrawlStatus("点击搜索读取数据", "neutral");
+  updateCrawlPaginationControls();
+}
+
+function markCrawlFiltersDirty() {
+  setCrawlStatus(
+    crawlDataState.hasLoaded ? "筛选条件已修改，点击搜索应用" : "点击搜索读取数据",
+    "neutral"
+  );
+}
+
 function setCrawlLoading(isLoading) {
   crawlDataState.isLoading = isLoading;
   const controlIds = [
@@ -899,11 +923,6 @@ async function refresh() {
   fillAiConfig(aiResponse.config || {});
   fillNotificationConfig(notificationResponse.config || {});
   fillAutostartConfig(autostartResponse.status || null);
-
-  const crawlSection = document.getElementById("section-crawl-data");
-  if ((crawlDataState.hasLoaded || crawlSection?.classList.contains("active")) && !crawlDataState.isLoading) {
-    await loadCrawlData({ page: crawlDataState.page });
-  }
 }
 
 async function saveBridgeConfig() {
@@ -940,6 +959,8 @@ async function clearCrawlData() {
   }
   await withButtonBusy("clearCrawlDataButton", "清空中...", () => sendMessage({ type: "clear-crawl-data" }));
   crawlDataState.page = 1;
+  crawlDataState.hasLoaded = false;
+  showCrawlManualReadyState();
   showFeedback("抓取数据库已清空");
 }
 
@@ -986,7 +1007,7 @@ async function activateSection(targetId, { updateHash = true } = {}) {
   }
 
   if (targetId === "section-crawl-data" && !crawlDataState.hasLoaded) {
-    await loadCrawlData({ page: 1 });
+    showCrawlManualReadyState();
   }
 }
 
@@ -1096,13 +1117,7 @@ document.getElementById("applyCrawlFiltersButton").addEventListener("click", asy
 });
 
 document.getElementById("crawlKeyword").addEventListener("input", () => {
-  if (crawlKeywordTimer) {
-    clearTimeout(crawlKeywordTimer);
-  }
-  crawlKeywordTimer = window.setTimeout(() => {
-    crawlDataState.page = 1;
-    loadCrawlData({ page: 1 }).catch(handleActionError);
-  }, 360);
+  markCrawlFiltersDirty();
 });
 
 document.getElementById("crawlKeyword").addEventListener("keydown", (event) => {
@@ -1110,30 +1125,18 @@ document.getElementById("crawlKeyword").addEventListener("keydown", (event) => {
     return;
   }
   event.preventDefault();
-  if (crawlKeywordTimer) {
-    clearTimeout(crawlKeywordTimer);
-  }
   crawlDataState.page = 1;
   loadCrawlData({ page: 1 }).catch(handleActionError);
 });
 
 ["crawlTag", "crawlAccessLevel", "crawlCategory", "crawlNotificationStatus"].forEach((id) => {
   document.getElementById(id).addEventListener("change", () => {
-    crawlDataState.page = 1;
-    loadCrawlData({ page: 1 }).catch(handleActionError);
+    markCrawlFiltersDirty();
   });
 });
 
-// 作者筛选 — 防抖输入
-let crawlAuthorTimer = null;
 document.getElementById("crawlAuthor").addEventListener("input", () => {
-  if (crawlAuthorTimer) {
-    clearTimeout(crawlAuthorTimer);
-  }
-  crawlAuthorTimer = window.setTimeout(() => {
-    crawlDataState.page = 1;
-    loadCrawlData({ page: 1 }).catch(handleActionError);
-  }, 360);
+  markCrawlFiltersDirty();
 });
 
 document.getElementById("crawlAuthor").addEventListener("keydown", (event) => {
@@ -1141,9 +1144,6 @@ document.getElementById("crawlAuthor").addEventListener("keydown", (event) => {
     return;
   }
   event.preventDefault();
-  if (crawlAuthorTimer) {
-    clearTimeout(crawlAuthorTimer);
-  }
   crawlDataState.page = 1;
   loadCrawlData({ page: 1 }).catch(handleActionError);
 });
